@@ -17,7 +17,7 @@ fn test_render_line_hook_with_args() {
     fs::create_dir(&plugins_dir).unwrap();
 
     // Create a simple plugin that captures render-line hook args
-    let test_plugin = r#"
+    let test_plugin = r###"
 // Test plugin to verify render-line hook receives args
 let line_count = 0;
 let found_marker = false;
@@ -63,7 +63,7 @@ editor.registerCommand(
 );
 
 editor.setStatus("Test plugin loaded!");
-"#;
+"###;
 
     let test_plugin_path = plugins_dir.join("test_render_hook.ts");
     fs::write(&test_plugin_path, test_plugin).unwrap();
@@ -1203,7 +1203,7 @@ fn test_color_highlighter_plugin() {
     fs::copy(&plugin_source, &plugin_dest).unwrap();
 
     // Create test file with various color formats
-    let test_file_content = r#"// Test file for Color Highlighter
+    let test_file_content = r###"// Test file for Color Highlighter
 // CSS hex colors
 let red = "#ff0000";
 let green = "#0f0";
@@ -1221,7 +1221,7 @@ hsla(240, 100%, 50%, 0.8);
 // Rust colors
 Color::Rgb(255, 255, 0)
 Color::Rgb(128, 0, 255)
-"#;
+"###;
 
     let fixture = TestFixture::new("test_colors.txt", test_file_content).unwrap();
 
@@ -1465,7 +1465,7 @@ fn test_panel_id_cleanup_after_buffer_close() {
     fs::create_dir(&plugins_dir).unwrap();
 
     // Create a plugin that creates a virtual buffer panel, closes it, and creates it again
-    let test_plugin = r#"
+    let test_plugin = r###"
 // Test plugin for panel_id cleanup after buffer close
 // This reproduces the find references bug where closing and reopening fails
 
@@ -1544,7 +1544,7 @@ globalThis.test_close_panel = function(): void {
 };
 
 editor.setStatus("Panel cleanup test plugin loaded");
-"#;
+"###;
 
     let test_plugin_path = plugins_dir.join("test_panel_cleanup.ts");
     fs::write(&test_plugin_path, test_plugin).unwrap();
