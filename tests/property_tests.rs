@@ -46,7 +46,7 @@ fn edit_op_strategy() -> impl Strategy<Value = EditOp> {
             .prop_filter("printable ASCII", |c| c.is_ascii() && !c.is_ascii_control())
             .prop_map(EditOp::TypeChar),
         2 => "[a-zA-Z0-9 ]{1,10}"
-            .prop_map(|s| EditOp::TypeString(s)),
+            .prop_map(EditOp::TypeString),
         // Navigation operations
         1 => Just(EditOp::Left),
         1 => Just(EditOp::Right),
