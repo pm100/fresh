@@ -8,9 +8,10 @@ use crate::overlay::OverlayFace;
 use crate::state::EditorState;
 use crate::virtual_text::VirtualTextPosition;
 use ratatui::style::Style;
+use serde::{Deserialize, Serialize};
 
 /// Kind of token in the view stream
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ViewTokenKind {
     /// Plain text slice
     Text(String),
@@ -33,7 +34,7 @@ pub enum ViewTokenKind {
 }
 
 /// A view token with source mapping
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ViewToken {
     /// Byte offset in source for this token, if any
     pub source_offset: Option<usize>,
