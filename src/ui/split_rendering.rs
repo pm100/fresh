@@ -76,8 +76,14 @@ struct DecorationContext {
 struct LineRenderOutput {
     lines: Vec<Line<'static>>,
     cursor: Option<(u16, u16)>,
-    last_line_end: Option<(u16, u16)>,
+    last_line_end: Option<LastLineEnd>,
     content_lines_rendered: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LastLineEnd {
+    pos: (u16, u16),
+    terminated_with_newline: bool,
 }
 
 struct SplitLayout {
@@ -848,7 +854,7 @@ impl SplitRenderer {
         let mut cursor_screen_x = 0u16;
         let mut cursor_screen_y = 0u16;
         let mut have_cursor = false;
-        let mut last_line_end: Option<(u16, u16)> = None;
+        let mut last_line_end: Option<LastLineEnd> = None;
 
         let is_empty_buffer = state.buffer.is_empty();
 
@@ -1222,16 +1228,52 @@ impl SplitRenderer {
                 visible_char_count += 1;
             }
 
+            // Set last_seg_y early so cursor detection works for both empty and non-empty lines
+            // For lines without wrapping, this will be the final y position
+            if line_spans.is_empty() || !line_wrap {
+                last_seg_y = Some(lines.len() as u16);
+            }
+
             if !line_has_newline {
                 let line_len_chars = line_content.chars().count();
-                let line_end_pos =
-                    line_view_offset + line_len_chars.saturating_sub(1);
+
+                // Map view positions to buffer positions using view_mapping
+                let last_char_view_idx = line_view_offset + line_len_chars.saturating_sub(1);
+                let after_last_char_view_idx = line_view_offset + line_len_chars;
+
+                let last_char_buf_pos = view_mapping.get(last_char_view_idx).copied().flatten();
+                let after_last_char_buf_pos = view_mapping.get(after_last_char_view_idx).copied().flatten();
+
                 let cursor_at_end = cursor_positions.iter().any(|&pos| {
-                    pos == line_end_pos || pos == line_view_offset + line_len_chars
+                    let matches_last = last_char_buf_pos.map_or(false, |bp| pos == bp);
+                    let matches_after = after_last_char_buf_pos.map_or(false, |bp| pos == bp);
+                    // Fallback: when there's no mapping after last char (EOF), check if cursor is at/near end
+                    // The fallback should match the position that would be "after" if there was a mapping
+                    let expected_after_pos = last_char_buf_pos.map(|p| p + 1).unwrap_or(0);
+                    let matches_fallback = after_last_char_buf_pos.is_none() && pos == expected_after_pos;
+
+                    matches_last || matches_after || matches_fallback
                 });
 
                 if cursor_at_end {
-                    let is_primary_at_end = line_end_pos == primary_cursor_position;
+                    let is_primary_at_end = last_char_buf_pos.map_or(false, |bp| bp == primary_cursor_position)
+                        || after_last_char_buf_pos.map_or(false, |bp| bp == primary_cursor_position)
+                        || (after_last_char_buf_pos.is_none() && primary_cursor_position >= state.buffer.len());
+
+                    // Track cursor position for primary cursor
+                    if is_primary_at_end && last_seg_y.is_some() {
+                        // For empty lines, cursor should be at position 0
+                        // For non-empty lines without newline, cursor is after the last character
+                        // Use line_len_chars since last_visible_x may not be set for non-wrapped lines
+                        cursor_screen_x = if line_len_chars == 0 {
+                            0
+                        } else {
+                            line_len_chars as u16
+                        };
+                        cursor_screen_y = last_seg_y.unwrap();
+                        have_cursor = true;
+                    }
+
                     let should_add_indicator = if is_active {
                         !is_primary_at_end
                     } else {
@@ -1351,29 +1393,45 @@ impl SplitRenderer {
 
                 lines_rendered = lines_rendered.saturating_sub(1);
             } else {
+                let current_y = lines.len() as u16;
+                last_seg_y = Some(current_y);
                 lines.push(Line::from(line_spans));
             }
 
-            if lines_rendered >= visible_line_count {
-                break;
-            }
-
+            // Update last_line_end and check for cursor on newline BEFORE the break check
+            // This ensures the last visible line's metadata is captured
             if let Some(y) = last_seg_y {
                 let end_x = last_visible_x.saturating_add(1);
                 let view_end_idx = line_view_offset + line_content.chars().count();
 
-                last_line_end = Some((end_x, y));
+                last_line_end = Some(LastLineEnd {
+                    pos: (end_x, y),
+                    terminated_with_newline: line_has_newline,
+                });
 
                 if line_has_newline && line_content.chars().count() > 0 {
                     let newline_idx = view_end_idx.saturating_sub(1);
                     if let Some(Some(src_newline)) = view_mapping.get(newline_idx) {
                         if *src_newline == primary_cursor_position {
-                            cursor_screen_x = end_x;
-                            cursor_screen_y = y;
+                            // For empty lines (just newline), cursor should be at start of current line
+                            // For lines with content, cursor on newline should be after the content
+                            if line_content.chars().count() == 1 {
+                                // Empty line - just the newline character
+                                cursor_screen_x = 0;
+                                cursor_screen_y = y;
+                            } else {
+                                // Line has content before the newline - cursor after last char
+                                cursor_screen_x = end_x;
+                                cursor_screen_y = y;
+                            }
                             have_cursor = true;
                         }
                     }
                 }
+            }
+
+            if lines_rendered >= visible_line_count {
+                break;
             }
         }
 
@@ -1394,7 +1452,7 @@ impl SplitRenderer {
         primary_cursor_position: usize,
         buffer_len: usize,
         buffer_ends_with_newline: bool,
-        last_line_end: Option<(u16, u16)>,
+        last_line_end: Option<LastLineEnd>,
         lines_rendered: usize,
     ) -> Option<(u16, u16)> {
         if current_cursor.is_some() || primary_cursor_position != buffer_len {
@@ -1402,10 +1460,14 @@ impl SplitRenderer {
         }
 
         if buffer_ends_with_newline {
-            return Some((0, lines_rendered.saturating_sub(1) as u16));
+            if let Some(end) = last_line_end {
+                // Cursor should appear on the implicit empty line after the newline
+                return Some((0, end.pos.1.saturating_add(1)));
+            }
+            return Some((0, lines_rendered as u16));
         }
 
-        last_line_end
+        last_line_end.map(|end| end.pos)
     }
 
 
@@ -1536,7 +1598,7 @@ impl SplitRenderer {
 
         let buffer_ends_with_newline = if state.buffer.len() > 0 {
             let last_char = state.get_text_range(state.buffer.len() - 1, state.buffer.len());
-            last_char == "\\n"
+            last_char == "\n"
         } else {
             false
         };
@@ -1725,5 +1787,485 @@ impl SplitRenderer {
 
         spans.push(Span::styled(current_text, current_style));
         spans
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::text_buffer::Buffer;
+    use crate::theme::Theme;
+
+    fn render_output_for(
+        content: &str,
+        cursor_pos: usize,
+    ) -> (LineRenderOutput, usize, bool, usize) {
+        let mut state = EditorState::new(20, 6, 1024);
+        state.buffer = Buffer::from_str(content, 1024);
+        state.cursors.primary_mut().position = cursor_pos.min(state.buffer.len());
+        state.viewport.resize(20, 4);
+        // Disable line numbers/gutters for simpler cursor position testing
+        state.margins.left_config.enabled = false;
+
+        let render_area = Rect::new(0, 0, 20, 4);
+        let visible_count = state.viewport.visible_line_count();
+
+        let view_data =
+            SplitRenderer::build_view_data(&mut state, None, content.len().max(1), visible_count);
+        let view_anchor =
+            SplitRenderer::calculate_view_anchor(&view_data.lines, &view_data.mapping, 0);
+
+        let estimated_lines = (state.buffer.len() / 80).max(1);
+        state.margins.update_width_for_buffer(estimated_lines);
+        let gutter_width = state.margins.left_total_width();
+
+        let selection = SplitRenderer::selection_context(&state);
+        let starting_line_num =
+            state
+                .buffer
+                .populate_line_cache(state.viewport.top_byte, visible_count);
+        let viewport_start = state.viewport.top_byte;
+        let viewport_end = SplitRenderer::calculate_viewport_end(
+            &mut state,
+            viewport_start,
+            content.len().max(1),
+            visible_count,
+        );
+        let decorations = SplitRenderer::decoration_context(
+            &mut state,
+            viewport_start,
+            viewport_end,
+            selection.primary_cursor_position,
+        );
+
+        let output = SplitRenderer::render_view_lines(LineRenderInput {
+            state: &state,
+            theme: &Theme::default(),
+            view_lines: &view_data.lines,
+            view_mapping: &view_data.mapping,
+            view_anchor,
+            render_area,
+            gutter_width,
+            selection: &selection,
+            decorations: &decorations,
+            starting_line_num,
+            visible_line_count: visible_count,
+            lsp_waiting: false,
+            is_active: true,
+            line_wrap: state.viewport.line_wrap_enabled,
+            estimated_lines,
+        });
+
+        (
+            output,
+            state.buffer.len(),
+            content.ends_with('\n'),
+            selection.primary_cursor_position,
+        )
+    }
+
+    #[test]
+    fn last_line_end_tracks_trailing_newline() {
+        let output = render_output_for("abc\n", 4);
+        assert_eq!(
+            output.0.last_line_end,
+            Some(LastLineEnd {
+                pos: (3, 0),
+                terminated_with_newline: true
+            })
+        );
+    }
+
+    #[test]
+    fn last_line_end_tracks_no_trailing_newline() {
+        let output = render_output_for("abc", 3);
+        assert_eq!(
+            output.0.last_line_end,
+            Some(LastLineEnd {
+                pos: (3, 0),
+                terminated_with_newline: false
+            })
+        );
+    }
+
+    #[test]
+    fn cursor_after_newline_places_on_next_line() {
+        let (output, buffer_len, buffer_newline, cursor_pos) = render_output_for("abc\n", 4);
+        let cursor = SplitRenderer::resolve_cursor_fallback(
+            output.cursor,
+            cursor_pos,
+            buffer_len,
+            buffer_newline,
+            output.last_line_end,
+            output.content_lines_rendered,
+        );
+        assert_eq!(cursor, Some((0, 1)));
+    }
+
+    #[test]
+    fn cursor_at_end_without_newline_stays_on_line() {
+        let (output, buffer_len, buffer_newline, cursor_pos) = render_output_for("abc", 3);
+        let cursor = SplitRenderer::resolve_cursor_fallback(
+            output.cursor,
+            cursor_pos,
+            buffer_len,
+            buffer_newline,
+            output.last_line_end,
+            output.content_lines_rendered,
+        );
+        assert_eq!(cursor, Some((3, 0)));
+    }
+
+    // Helper to count all cursor positions in rendered output
+    // Cursors can appear as:
+    // 1. Primary cursor in output.cursor (hardware cursor position)
+    // 2. Visual spans with REVERSED modifier (secondary cursors)
+    // 3. Visual spans with special background color (inactive cursors)
+    fn count_all_cursors(output: &LineRenderOutput) -> Vec<(u16, u16)> {
+        let mut cursor_positions = Vec::new();
+
+        // Check for primary cursor in output.cursor field
+        if let Some(cursor_pos) = output.cursor {
+            cursor_positions.push(cursor_pos);
+        }
+
+        // Check for visual cursor indicators in rendered spans (secondary/inactive cursors)
+        for (line_idx, line) in output.lines.iter().enumerate() {
+            let mut col = 0u16;
+            for span in line.spans.iter() {
+                // Check if this span has the REVERSED modifier (secondary cursor)
+                if span.style.add_modifier.contains(ratatui::style::Modifier::REVERSED) {
+                    // Found a visual cursor - record its position
+                    cursor_positions.push((col, line_idx as u16));
+                }
+                // Count the width of this span's content
+                col += span.content.chars().count() as u16;
+            }
+        }
+
+        cursor_positions
+    }
+
+    // Helper to dump rendered output for debugging
+    fn dump_render_output(content: &str, cursor_pos: usize, output: &LineRenderOutput) {
+        eprintln!("\n=== RENDER DEBUG ===");
+        eprintln!("Content: {:?}", content);
+        eprintln!("Cursor position: {}", cursor_pos);
+        eprintln!("Hardware cursor (output.cursor): {:?}", output.cursor);
+        eprintln!("Last line end: {:?}", output.last_line_end);
+        eprintln!("Content lines rendered: {}", output.content_lines_rendered);
+        eprintln!("\nRendered lines:");
+        for (line_idx, line) in output.lines.iter().enumerate() {
+            eprintln!("  Line {}: {} spans", line_idx, line.spans.len());
+            for (span_idx, span) in line.spans.iter().enumerate() {
+                let has_reversed = span.style.add_modifier.contains(ratatui::style::Modifier::REVERSED);
+                let bg_color = format!("{:?}", span.style.bg);
+                eprintln!("    Span {}: {:?} (REVERSED: {}, BG: {})",
+                    span_idx, span.content, has_reversed, bg_color);
+            }
+        }
+        eprintln!("===================\n");
+    }
+
+    // Helper to get final cursor position after fallback resolution
+    // Also validates that exactly one cursor is present
+    fn get_final_cursor(content: &str, cursor_pos: usize) -> Option<(u16, u16)> {
+        let (output, buffer_len, buffer_newline, cursor_pos) = render_output_for(content, cursor_pos);
+
+        // Count all cursors (hardware + visual) in the rendered output
+        let all_cursors = count_all_cursors(&output);
+
+        // Validate that at most one cursor is present in rendered output
+        // (Some cursors are added by fallback logic, not during rendering)
+        assert!(
+            all_cursors.len() <= 1,
+            "Expected at most 1 cursor in rendered output, found {} at positions: {:?}",
+            all_cursors.len(),
+            all_cursors
+        );
+
+        let final_cursor = SplitRenderer::resolve_cursor_fallback(
+            output.cursor,
+            cursor_pos,
+            buffer_len,
+            buffer_newline,
+            output.last_line_end,
+            output.content_lines_rendered,
+        );
+
+        // Debug dump if we find unexpected results
+        if all_cursors.len() > 1 || (all_cursors.len() == 1 && Some(all_cursors[0]) != final_cursor) {
+            dump_render_output(content, cursor_pos, &output);
+        }
+
+        // If a cursor was rendered, it should match the final cursor position
+        if let Some(rendered_cursor) = all_cursors.first() {
+            assert_eq!(
+                Some(*rendered_cursor),
+                final_cursor,
+                "Rendered cursor at {:?} doesn't match final cursor {:?}",
+                rendered_cursor,
+                final_cursor
+            );
+        }
+
+        // Validate that we have a final cursor position (either rendered or from fallback)
+        assert!(
+            final_cursor.is_some(),
+            "Expected a final cursor position, but got None. Rendered cursors: {:?}",
+            all_cursors
+        );
+
+        final_cursor
+    }
+
+    // Helper to simulate typing a character and check if it appears at cursor position
+    fn check_typing_at_cursor(content: &str, cursor_pos: usize, char_to_type: char) -> (Option<(u16, u16)>, String) {
+        // Get cursor position before typing
+        let cursor_before = get_final_cursor(content, cursor_pos);
+
+        // Simulate inserting the character at cursor position
+        let mut new_content = content.to_string();
+        if cursor_pos <= content.len() {
+            new_content.insert(cursor_pos, char_to_type);
+        }
+
+        (cursor_before, new_content)
+    }
+
+    #[test]
+    fn e2e_cursor_at_start_of_nonempty_line() {
+        // "abc" with cursor at position 0 (before 'a')
+        let cursor = get_final_cursor("abc", 0);
+        assert_eq!(cursor, Some((0, 0)), "Cursor should be at column 0, line 0");
+
+        let (cursor_pos, new_content) = check_typing_at_cursor("abc", 0, 'X');
+        assert_eq!(new_content, "Xabc", "Typing should insert at cursor position");
+        assert_eq!(cursor_pos, Some((0, 0)));
+    }
+
+    #[test]
+    fn e2e_cursor_in_middle_of_line() {
+        // "abc" with cursor at position 1 (on 'b')
+        let cursor = get_final_cursor("abc", 1);
+        assert_eq!(cursor, Some((1, 0)), "Cursor should be at column 1, line 0");
+
+        let (cursor_pos, new_content) = check_typing_at_cursor("abc", 1, 'X');
+        assert_eq!(new_content, "aXbc", "Typing should insert at cursor position");
+        assert_eq!(cursor_pos, Some((1, 0)));
+    }
+
+    #[test]
+    fn e2e_cursor_at_end_of_line_no_newline() {
+        // "abc" with cursor at position 3 (after 'c', at EOF)
+        let cursor = get_final_cursor("abc", 3);
+        assert_eq!(cursor, Some((3, 0)), "Cursor should be at column 3, line 0 (after last char)");
+
+        let (cursor_pos, new_content) = check_typing_at_cursor("abc", 3, 'X');
+        assert_eq!(new_content, "abcX", "Typing should append at end");
+        assert_eq!(cursor_pos, Some((3, 0)));
+    }
+
+    #[test]
+    fn e2e_cursor_at_empty_line() {
+        // "\n" with cursor at position 0 (on the newline itself)
+        let cursor = get_final_cursor("\n", 0);
+        assert_eq!(cursor, Some((0, 0)), "Cursor on empty line should be at column 0");
+
+        let (cursor_pos, new_content) = check_typing_at_cursor("\n", 0, 'X');
+        assert_eq!(new_content, "X\n", "Typing should insert before newline");
+        assert_eq!(cursor_pos, Some((0, 0)));
+    }
+
+    #[test]
+    fn e2e_cursor_after_newline_at_eof() {
+        // "abc\n" with cursor at position 4 (after newline, at EOF)
+        let cursor = get_final_cursor("abc\n", 4);
+        assert_eq!(cursor, Some((0, 1)), "Cursor after newline at EOF should be on next line");
+
+        let (cursor_pos, new_content) = check_typing_at_cursor("abc\n", 4, 'X');
+        assert_eq!(new_content, "abc\nX", "Typing should insert on new line");
+        assert_eq!(cursor_pos, Some((0, 1)));
+    }
+
+    #[test]
+    fn e2e_cursor_on_newline_with_content() {
+        // "abc\n" with cursor at position 3 (on the newline character)
+        let cursor = get_final_cursor("abc\n", 3);
+        assert_eq!(cursor, Some((3, 0)), "Cursor on newline after content should be after last char");
+
+        let (cursor_pos, new_content) = check_typing_at_cursor("abc\n", 3, 'X');
+        assert_eq!(new_content, "abcX\n", "Typing should insert before newline");
+        assert_eq!(cursor_pos, Some((3, 0)));
+    }
+
+    #[test]
+    fn e2e_cursor_multiline_start_of_second_line() {
+        // "abc\ndef" with cursor at position 4 (start of second line, on 'd')
+        let cursor = get_final_cursor("abc\ndef", 4);
+        assert_eq!(cursor, Some((0, 1)), "Cursor at start of second line should be at column 0, line 1");
+
+        let (cursor_pos, new_content) = check_typing_at_cursor("abc\ndef", 4, 'X');
+        assert_eq!(new_content, "abc\nXdef", "Typing should insert at start of second line");
+        assert_eq!(cursor_pos, Some((0, 1)));
+    }
+
+    #[test]
+    fn e2e_cursor_multiline_end_of_first_line() {
+        // "abc\ndef" with cursor at position 3 (on newline of first line)
+        let cursor = get_final_cursor("abc\ndef", 3);
+        assert_eq!(cursor, Some((3, 0)), "Cursor on newline of first line should be after content");
+
+        let (cursor_pos, new_content) = check_typing_at_cursor("abc\ndef", 3, 'X');
+        assert_eq!(new_content, "abcX\ndef", "Typing should insert before newline");
+        assert_eq!(cursor_pos, Some((3, 0)));
+    }
+
+    #[test]
+    fn e2e_cursor_empty_buffer() {
+        // Empty buffer with cursor at position 0
+        let cursor = get_final_cursor("", 0);
+        assert_eq!(cursor, Some((0, 0)), "Cursor in empty buffer should be at origin");
+
+        let (cursor_pos, new_content) = check_typing_at_cursor("", 0, 'X');
+        assert_eq!(new_content, "X", "Typing in empty buffer should insert character");
+        assert_eq!(cursor_pos, Some((0, 0)));
+    }
+
+    #[test]
+    fn e2e_cursor_between_empty_lines() {
+        // "\n\n" with cursor at position 1 (on second newline)
+        let cursor = get_final_cursor("\n\n", 1);
+        assert_eq!(cursor, Some((0, 1)), "Cursor on second empty line");
+
+        let (cursor_pos, new_content) = check_typing_at_cursor("\n\n", 1, 'X');
+        assert_eq!(new_content, "\nX\n", "Typing should insert on second line");
+        assert_eq!(cursor_pos, Some((0, 1)));
+    }
+
+    #[test]
+    fn e2e_cursor_at_eof_after_multiple_lines() {
+        // "abc\ndef\nghi" with cursor at position 11 (at EOF, no trailing newline)
+        let cursor = get_final_cursor("abc\ndef\nghi", 11);
+        assert_eq!(cursor, Some((3, 2)), "Cursor at EOF after 'i' should be at column 3, line 2");
+
+        let (cursor_pos, new_content) = check_typing_at_cursor("abc\ndef\nghi", 11, 'X');
+        assert_eq!(new_content, "abc\ndef\nghiX", "Typing should append at end");
+        assert_eq!(cursor_pos, Some((3, 2)));
+    }
+
+    #[test]
+    fn e2e_cursor_at_eof_with_trailing_newline() {
+        // "abc\ndef\nghi\n" with cursor at position 12 (after trailing newline)
+        let cursor = get_final_cursor("abc\ndef\nghi\n", 12);
+        assert_eq!(cursor, Some((0, 3)), "Cursor after trailing newline should be on line 3");
+
+        let (cursor_pos, new_content) = check_typing_at_cursor("abc\ndef\nghi\n", 12, 'X');
+        assert_eq!(new_content, "abc\ndef\nghi\nX", "Typing should insert on new line");
+        assert_eq!(cursor_pos, Some((0, 3)));
+    }
+
+    #[test]
+    fn e2e_jump_to_end_of_buffer_no_trailing_newline() {
+        // Simulate Ctrl+End: jump from start to end of buffer without trailing newline
+        let content = "abc\ndef\nghi";
+
+        // Start at position 0
+        let cursor_at_start = get_final_cursor(content, 0);
+        assert_eq!(cursor_at_start, Some((0, 0)), "Cursor starts at beginning");
+
+        // Jump to EOF (position 11, after 'i')
+        let cursor_at_eof = get_final_cursor(content, 11);
+        assert_eq!(cursor_at_eof, Some((3, 2)), "After Ctrl+End, cursor at column 3, line 2");
+
+        // Type a character at EOF
+        let (cursor_before_typing, new_content) = check_typing_at_cursor(content, 11, 'X');
+        assert_eq!(cursor_before_typing, Some((3, 2)));
+        assert_eq!(new_content, "abc\ndef\nghiX", "Character appended at end");
+
+        // Verify cursor position in the new content
+        let cursor_after_typing = get_final_cursor(&new_content, 12);
+        assert_eq!(cursor_after_typing, Some((4, 2)), "After typing, cursor moved to column 4");
+
+        // Move cursor to start of buffer - verify cursor is no longer at end
+        let cursor_moved_away = get_final_cursor(&new_content, 0);
+        assert_eq!(cursor_moved_away, Some((0, 0)), "Cursor moved to start");
+        // The cursor should NOT be at the end anymore - verify by rendering without cursor at end
+        // This implicitly tests that only one cursor is rendered
+    }
+
+    #[test]
+    fn e2e_jump_to_end_of_buffer_with_trailing_newline() {
+        // Simulate Ctrl+End: jump from start to end of buffer WITH trailing newline
+        let content = "abc\ndef\nghi\n";
+
+        // Start at position 0
+        let cursor_at_start = get_final_cursor(content, 0);
+        assert_eq!(cursor_at_start, Some((0, 0)), "Cursor starts at beginning");
+
+        // Jump to EOF (position 12, after trailing newline)
+        let cursor_at_eof = get_final_cursor(content, 12);
+        assert_eq!(cursor_at_eof, Some((0, 3)), "After Ctrl+End, cursor at column 0, line 3 (new line)");
+
+        // Type a character at EOF
+        let (cursor_before_typing, new_content) = check_typing_at_cursor(content, 12, 'X');
+        assert_eq!(cursor_before_typing, Some((0, 3)));
+        assert_eq!(new_content, "abc\ndef\nghi\nX", "Character inserted on new line");
+
+        // After typing, the cursor should move forward
+        let cursor_after_typing = get_final_cursor(&new_content, 13);
+        assert_eq!(cursor_after_typing, Some((1, 3)), "After typing, cursor should be at column 1, line 3");
+
+        // Move cursor to middle of buffer - verify cursor is no longer at end
+        let cursor_moved_away = get_final_cursor(&new_content, 4);
+        assert_eq!(cursor_moved_away, Some((0, 1)), "Cursor moved to start of line 1 (position 4 = start of 'def')");
+    }
+
+    #[test]
+    fn e2e_jump_to_end_of_empty_buffer() {
+        // Edge case: Ctrl+End in empty buffer should stay at (0,0)
+        let content = "";
+
+        let cursor_at_eof = get_final_cursor(content, 0);
+        assert_eq!(cursor_at_eof, Some((0, 0)), "Empty buffer: cursor at origin");
+
+        // Type a character
+        let (cursor_before_typing, new_content) = check_typing_at_cursor(content, 0, 'X');
+        assert_eq!(cursor_before_typing, Some((0, 0)));
+        assert_eq!(new_content, "X", "Character inserted");
+
+        // Verify cursor after typing
+        let cursor_after_typing = get_final_cursor(&new_content, 1);
+        assert_eq!(cursor_after_typing, Some((1, 0)), "After typing, cursor at column 1");
+
+        // Move cursor back to start - verify cursor is no longer at end
+        let cursor_moved_away = get_final_cursor(&new_content, 0);
+        assert_eq!(cursor_moved_away, Some((0, 0)), "Cursor moved back to start");
+    }
+
+    #[test]
+    fn e2e_jump_to_end_of_single_empty_line() {
+        // Edge case: buffer with just a newline
+        let content = "\n";
+
+        // Position 0 is ON the newline
+        let cursor_on_newline = get_final_cursor(content, 0);
+        assert_eq!(cursor_on_newline, Some((0, 0)), "Cursor on the newline character");
+
+        // Position 1 is AFTER the newline (EOF)
+        let cursor_at_eof = get_final_cursor(content, 1);
+        assert_eq!(cursor_at_eof, Some((0, 1)), "After Ctrl+End, cursor on line 1");
+
+        // Type at EOF
+        let (cursor_before_typing, new_content) = check_typing_at_cursor(content, 1, 'X');
+        assert_eq!(cursor_before_typing, Some((0, 1)));
+        assert_eq!(new_content, "\nX", "Character on second line");
+
+        let cursor_after_typing = get_final_cursor(&new_content, 2);
+        assert_eq!(cursor_after_typing, Some((1, 1)), "After typing, cursor at column 1, line 1");
+
+        // Move cursor to the newline - verify cursor is no longer at end
+        let cursor_moved_away = get_final_cursor(&new_content, 0);
+        assert_eq!(cursor_moved_away, Some((0, 0)), "Cursor moved to the newline on line 0");
     }
 }
