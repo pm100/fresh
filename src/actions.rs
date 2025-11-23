@@ -1373,6 +1373,44 @@ pub fn action_to_events(
             }
         }
 
+        Action::DeleteToLineEnd => {
+            // Delete from cursor to end of line (like Ctrl+K in emacs/bash)
+            let deletions: Vec<_> = state
+                .cursors
+                .iter()
+                .filter_map(|(cursor_id, cursor)| {
+                    let mut iter = state
+                        .buffer
+                        .line_iterator(cursor.position, estimated_line_length);
+                    let line_start = iter.current_position();
+                    iter.next().map(|(_start, content)| {
+                        // Find the end of line (excluding newline)
+                        let line_end = line_start + content.trim_end_matches('\n').len();
+                        if cursor.position < line_end {
+                            Some((cursor_id, cursor.position..line_end))
+                        } else {
+                            // If cursor is at end of line content, delete the newline instead
+                            let full_line_end = line_start + content.len();
+                            if cursor.position < full_line_end {
+                                Some((cursor_id, cursor.position..full_line_end))
+                            } else {
+                                None
+                            }
+                        }
+                    })?
+                })
+                .collect();
+
+            for (cursor_id, range) in deletions {
+                let deleted_text = state.get_text_range(range.start, range.end);
+                events.push(Event::Delete {
+                    range,
+                    deleted_text,
+                    cursor_id,
+                });
+            }
+        }
+
         Action::TransposeChars => {
             // Transpose the character before the cursor with the one at the cursor
             // Collect cursor positions first to avoid borrow issues
@@ -1541,6 +1579,7 @@ pub fn action_to_events(
         | Action::PromptMoveWordRight
         | Action::PromptDeleteWordForward
         | Action::PromptDeleteWordBackward
+        | Action::PromptDeleteToLineEnd
         | Action::PromptCopy
         | Action::PromptCut
         | Action::PromptPaste

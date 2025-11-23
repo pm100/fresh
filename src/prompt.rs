@@ -292,6 +292,26 @@ impl Prompt {
         }
     }
 
+    /// Delete from cursor to end of line (Ctrl+K).
+    ///
+    /// Deletes all text from the cursor position to the end of the input.
+    ///
+    /// # Example
+    /// ```
+    /// # use fresh::prompt::{Prompt, PromptType};
+    /// let mut prompt = Prompt::new("Find: ".to_string(), PromptType::OpenFile);
+    /// prompt.input = "hello world".to_string();
+    /// prompt.cursor_pos = 5; // After "hello"
+    /// prompt.delete_to_end();
+    /// assert_eq!(prompt.input, "hello");
+    /// assert_eq!(prompt.cursor_pos, 5);
+    /// ```
+    pub fn delete_to_end(&mut self) {
+        if self.cursor_pos < self.input.len() {
+            self.input.truncate(self.cursor_pos);
+        }
+    }
+
     /// Get the current input text (for copy operation).
     ///
     /// Returns a copy of the entire input. In future, this could be extended

@@ -6,7 +6,7 @@
     "cursor": [0, 0, 255],
     "selection_bg": [173, 214, 255],
     "current_line_bg": [245, 245, 245],
-    "line_number_fg": [133, 133, 133],
+    "line_number_fg": [140, 140, 140],
     "line_number_bg": [255, 255, 255]
   },
   "ui": {
@@ -16,9 +16,9 @@
     "tab_inactive_bg": "Gray",
     "tab_separator_bg": "White",
     "status_bar_fg": "White",
-    "status_bar_bg": "Blue",
-    "prompt_fg": "Black",
-    "prompt_bg": "Yellow",
+    "status_bar_bg": "DarkGray",
+    "prompt_fg": "White",
+    "prompt_bg": "Black",
     "prompt_selection_fg": "Black",
     "prompt_selection_bg": [173, 214, 255],
     "popup_border_fg": "DarkGray",
@@ -33,7 +33,7 @@
     "help_separator_fg": "Gray",
     "help_indicator_fg": "Red",
     "help_indicator_bg": "White",
-    "split_separator_fg": "Gray"
+    "split_separator_fg": [140, 140, 140]
   },
   "search": {
     "match_bg": [255, 255, 150],

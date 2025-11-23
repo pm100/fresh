@@ -363,6 +363,14 @@
       "when": "normal"
     },
     {
+      "comment": "Normal context - Delete to end of line (Ctrl+K)",
+      "key": "k",
+      "modifiers": ["ctrl"],
+      "action": "delete_to_line_end",
+      "args": {},
+      "when": "normal"
+    },
+    {
       "comment": "Normal context - Advanced selection",
       "key": "w",
       "modifiers": ["ctrl"],
@@ -1051,6 +1059,22 @@
       "key": "Delete",
       "modifiers": ["ctrl"],
       "action": "prompt_delete_word_forward",
+      "args": {},
+      "when": "prompt"
+    },
+    {
+      "comment": "Prompt context - Delete to end of line (Ctrl+K)",
+      "key": "k",
+      "modifiers": ["ctrl"],
+      "action": "prompt_delete_to_line_end",
+      "args": {},
+      "when": "prompt"
+    },
+    {
+      "comment": "Prompt context - Delete word backward (Ctrl+W)",
+      "key": "w",
+      "modifiers": ["ctrl"],
+      "action": "prompt_delete_word_backward",
       "args": {},
       "when": "prompt"
     },

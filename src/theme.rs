@@ -423,7 +423,7 @@ impl Theme {
             inactive_cursor: Color::Rgb(100, 100, 100),
             selection_bg: Color::Rgb(38, 79, 120),
             current_line_bg: Color::Rgb(40, 40, 40),
-            line_number_fg: Color::Rgb(133, 133, 133),
+            line_number_fg: Color::Rgb(100, 100, 100),
             line_number_bg: Color::Rgb(30, 30, 30),
 
             // UI element colors
@@ -447,10 +447,10 @@ impl Theme {
             menu_hover_bg: Color::Rgb(55, 55, 55),
             menu_hover_fg: Color::Rgb(255, 255, 255),
 
-            status_bar_fg: Color::Black,
-            status_bar_bg: Color::White,
-            prompt_fg: Color::Black,
-            prompt_bg: Color::Yellow,
+            status_bar_fg: Color::White,
+            status_bar_bg: Color::DarkGray,
+            prompt_fg: Color::White,
+            prompt_bg: Color::Black,
             prompt_selection_fg: Color::White,
             prompt_selection_bg: Color::Rgb(58, 79, 120), // Blue selection
 
@@ -470,7 +470,7 @@ impl Theme {
             help_indicator_fg: Color::Red,
             help_indicator_bg: Color::Black,
 
-            split_separator_fg: Color::DarkGray,
+            split_separator_fg: Color::Rgb(100, 100, 100),
             split_separator_hover_fg: Color::Rgb(100, 149, 237), // Cornflower blue
 
             // Scrollbar colors
@@ -517,7 +517,7 @@ impl Theme {
             inactive_cursor: Color::Rgb(180, 180, 180),
             selection_bg: Color::Rgb(173, 214, 255),
             current_line_bg: Color::Rgb(245, 245, 245),
-            line_number_fg: Color::Rgb(133, 133, 133),
+            line_number_fg: Color::Rgb(140, 140, 140),
             line_number_bg: Color::Rgb(255, 255, 255),
 
             // UI element colors
@@ -542,9 +542,9 @@ impl Theme {
             menu_hover_fg: Color::Rgb(0, 0, 0),
 
             status_bar_fg: Color::White,
-            status_bar_bg: Color::Blue,
-            prompt_fg: Color::Black,
-            prompt_bg: Color::Yellow,
+            status_bar_bg: Color::DarkGray,
+            prompt_fg: Color::White,
+            prompt_bg: Color::Black,
             prompt_selection_fg: Color::Black,
             prompt_selection_bg: Color::Rgb(173, 214, 255), // Light blue selection
 
@@ -564,7 +564,7 @@ impl Theme {
             help_indicator_fg: Color::Red,
             help_indicator_bg: Color::White,
 
-            split_separator_fg: Color::Gray,
+            split_separator_fg: Color::Rgb(140, 140, 140),
             split_separator_hover_fg: Color::Rgb(70, 130, 180), // Steel blue
 
             // Scrollbar colors
@@ -611,7 +611,7 @@ impl Theme {
             inactive_cursor: Color::DarkGray,
             selection_bg: Color::Rgb(0, 100, 200),
             current_line_bg: Color::Rgb(20, 20, 20),
-            line_number_fg: Color::Rgb(150, 150, 150),
+            line_number_fg: Color::Rgb(140, 140, 140),
             line_number_bg: Color::Black,
 
             // UI element colors
@@ -635,10 +635,10 @@ impl Theme {
             menu_hover_bg: Color::Rgb(50, 50, 50),
             menu_hover_fg: Color::Yellow,
 
-            status_bar_fg: Color::Black,
-            status_bar_bg: Color::Yellow,
-            prompt_fg: Color::Black,
-            prompt_bg: Color::Cyan,
+            status_bar_fg: Color::White,
+            status_bar_bg: Color::DarkGray,
+            prompt_fg: Color::White,
+            prompt_bg: Color::Black,
             prompt_selection_fg: Color::White,
             prompt_selection_bg: Color::Rgb(0, 100, 200), // Blue selection
 
@@ -658,7 +658,7 @@ impl Theme {
             help_indicator_fg: Color::Red,
             help_indicator_bg: Color::Black,
 
-            split_separator_fg: Color::White,
+            split_separator_fg: Color::Rgb(140, 140, 140),
             split_separator_hover_fg: Color::Yellow,
 
             // Scrollbar colors

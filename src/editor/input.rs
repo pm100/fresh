@@ -374,6 +374,12 @@ impl Editor {
                 }
                 self.update_prompt_suggestions();
             }
+            Action::PromptDeleteToLineEnd => {
+                if let Some(prompt) = self.prompt_mut() {
+                    prompt.delete_to_end();
+                }
+                self.update_prompt_suggestions();
+            }
             Action::PromptCopy => {
                 if let Some(prompt) = &self.prompt {
                     // If there's a selection, copy selected text; otherwise copy entire input
