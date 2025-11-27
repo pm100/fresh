@@ -5,6 +5,7 @@
 - ~~src/services/plugins/runtime.rs:3299 and thread.rs:738 — duplicate `hook_args_to_json`~~ → Consolidated into `src/services/plugins/hooks.rs`
 - ~~src/app/mod.rs:3284 — `process_async_messages` ~680 lines~~ → Refactored into `src/app/async_messages.rs` with domain-grouped handlers (LSP, file system, file explorer, plugins)
 - ~~src/input/multi_cursor.rs — duplicate add-cursor helpers~~ → Extracted shared helpers (get_cursor_line_info, cursor_position_on_line, success_result, adjust_position_for_newline)
+- ~~src/input/actions.rs:1400+ — repeated collect-and-apply patterns~~ → Extracted `apply_deletions` helper (eliminated 8 duplicate 7-line blocks)
 
 ## Large Functions
 - src/view/ui/split_rendering.rs:1135 — `render_view_lines` is ~750 lines; consider breaking into smaller helpers for different rendering concerns.

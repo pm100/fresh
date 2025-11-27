@@ -18,6 +18,49 @@ use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter 
 /// Maximum bytes to parse in a single operation (for viewport highlighting)
 const MAX_PARSE_BYTES: usize = LARGE_FILE_THRESHOLD_BYTES as usize; // 1MB
 
+/// Default highlight color scheme used by most languages.
+/// Index order: attribute, comment, constant, function, keyword, number, operator, property, string, type, variable
+const DEFAULT_HIGHLIGHT_COLORS: &[Color] = &[
+    Color::Cyan,     // 0: attribute
+    Color::DarkGray, // 1: comment
+    Color::Magenta,  // 2: constant
+    Color::Yellow,   // 3: function
+    Color::Red,      // 4: keyword
+    Color::Magenta,  // 5: number
+    Color::White,    // 6: operator
+    Color::Cyan,     // 7: property
+    Color::Green,    // 8: string
+    Color::Blue,     // 9: type
+    Color::White,    // 10: variable
+];
+
+/// TypeScript-specific highlight color scheme with extended categories.
+const TYPESCRIPT_HIGHLIGHT_COLORS: &[Color] = &[
+    Color::Cyan,       // 0: attribute
+    Color::DarkGray,   // 1: comment
+    Color::Magenta,    // 2: constant
+    Color::Magenta,    // 3: constant.builtin (null, undefined, true, false)
+    Color::Blue,       // 4: constructor
+    Color::Green,      // 5: embedded (template substitutions)
+    Color::Yellow,     // 6: function
+    Color::Yellow,     // 7: function.builtin (require)
+    Color::Yellow,     // 8: function.method
+    Color::Red,        // 9: keyword
+    Color::Magenta,    // 10: number
+    Color::White,      // 11: operator
+    Color::Cyan,       // 12: property
+    Color::White,      // 13: punctuation.bracket
+    Color::White,      // 14: punctuation.delimiter
+    Color::Cyan,       // 15: punctuation.special (template ${})
+    Color::Green,      // 16: string
+    Color::Green,      // 17: string.special (regex)
+    Color::Blue,       // 18: type
+    Color::Blue,       // 19: type.builtin
+    Color::White,      // 20: variable
+    Color::Magenta,    // 21: variable.builtin (this, super, arguments)
+    Color::LightCyan,  // 22: variable.parameter
+];
+
 /// A highlighted span of text
 #[derive(Debug, Clone)]
 pub struct HighlightSpan {
@@ -528,161 +571,11 @@ impl Language {
 
     /// Map tree-sitter highlight index to color
     fn highlight_color(&self, index: usize) -> Color {
-        match self {
-            Language::Rust => match index {
-                0 => Color::Cyan,     // attribute
-                1 => Color::DarkGray, // comment
-                2 => Color::Magenta,  // constant
-                3 => Color::Yellow,   // function
-                4 => Color::Red,      // keyword
-                5 => Color::Magenta,  // number
-                6 => Color::White,    // operator
-                7 => Color::Cyan,     // property
-                8 => Color::Green,    // string
-                9 => Color::Blue,     // type
-                10 => Color::White,   // variable
-                _ => Color::White,    // default
-            },
-            Language::Python => match index {
-                0 => Color::Cyan,     // attribute
-                1 => Color::DarkGray, // comment
-                2 => Color::Magenta,  // constant
-                3 => Color::Yellow,   // function
-                4 => Color::Red,      // keyword
-                5 => Color::Magenta,  // number
-                6 => Color::White,    // operator
-                7 => Color::Cyan,     // property
-                8 => Color::Green,    // string
-                9 => Color::Blue,     // type
-                10 => Color::White,   // variable
-                _ => Color::White,    // default
-            },
-            Language::JavaScript => match index {
-                0 => Color::Cyan,     // attribute
-                1 => Color::DarkGray, // comment
-                2 => Color::Magenta,  // constant
-                3 => Color::Yellow,   // function
-                4 => Color::Red,      // keyword
-                5 => Color::Magenta,  // number
-                6 => Color::White,    // operator
-                7 => Color::Cyan,     // property
-                8 => Color::Green,    // string
-                9 => Color::Blue,     // type
-                10 => Color::White,   // variable
-                _ => Color::White,    // default
-            },
-            Language::TypeScript => match index {
-                // Maps to the configure() order in highlight_config
-                0 => Color::Cyan,       // attribute
-                1 => Color::DarkGray,   // comment
-                2 => Color::Magenta,    // constant
-                3 => Color::Magenta,    // constant.builtin (null, undefined, true, false)
-                4 => Color::Blue,       // constructor
-                5 => Color::Green,      // embedded (template substitutions)
-                6 => Color::Yellow,     // function
-                7 => Color::Yellow,     // function.builtin (require)
-                8 => Color::Yellow,     // function.method
-                9 => Color::Red,        // keyword
-                10 => Color::Magenta,   // number
-                11 => Color::White,     // operator
-                12 => Color::Cyan,      // property
-                13 => Color::White,     // punctuation.bracket
-                14 => Color::White,     // punctuation.delimiter
-                15 => Color::Cyan,      // punctuation.special (template ${})
-                16 => Color::Green,     // string
-                17 => Color::Green,     // string.special (regex)
-                18 => Color::Blue,      // type
-                19 => Color::Blue,      // type.builtin
-                20 => Color::White,     // variable
-                21 => Color::Magenta,   // variable.builtin (this, super, arguments)
-                22 => Color::LightCyan, // variable.parameter
-                _ => Color::White,      // default
-            },
-            Language::HTML | Language::CSS => match index {
-                0 => Color::Cyan,     // attribute
-                1 => Color::DarkGray, // comment
-                2 => Color::Magenta,  // constant
-                3 => Color::Yellow,   // function
-                4 => Color::Red,      // keyword
-                5 => Color::Magenta,  // number
-                6 => Color::White,    // operator
-                7 => Color::Cyan,     // property
-                8 => Color::Green,    // string
-                9 => Color::Blue,     // type
-                10 => Color::White,   // variable
-                _ => Color::White,    // default
-            },
-            Language::C | Language::Cpp => match index {
-                0 => Color::Cyan,     // attribute
-                1 => Color::DarkGray, // comment
-                2 => Color::Magenta,  // constant
-                3 => Color::Yellow,   // function
-                4 => Color::Red,      // keyword
-                5 => Color::Magenta,  // number
-                6 => Color::White,    // operator
-                7 => Color::Cyan,     // property
-                8 => Color::Green,    // string
-                9 => Color::Blue,     // type
-                10 => Color::White,   // variable
-                _ => Color::White,    // default
-            },
-            Language::Go => match index {
-                0 => Color::Cyan,     // attribute
-                1 => Color::DarkGray, // comment
-                2 => Color::Magenta,  // constant
-                3 => Color::Yellow,   // function
-                4 => Color::Red,      // keyword
-                5 => Color::Magenta,  // number
-                6 => Color::White,    // operator
-                7 => Color::Cyan,     // property
-                8 => Color::Green,    // string
-                9 => Color::Blue,     // type
-                10 => Color::White,   // variable
-                _ => Color::White,    // default
-            },
-            Language::Json => match index {
-                0 => Color::Cyan,     // attribute
-                1 => Color::DarkGray, // comment
-                2 => Color::Magenta,  // constant
-                3 => Color::Yellow,   // function
-                4 => Color::Red,      // keyword
-                5 => Color::Magenta,  // number
-                6 => Color::White,    // operator
-                7 => Color::Cyan,     // property
-                8 => Color::Green,    // string
-                9 => Color::Blue,     // type
-                10 => Color::White,   // variable
-                _ => Color::White,    // default
-            },
-            Language::Java | Language::CSharp => match index {
-                0 => Color::Cyan,     // attribute
-                1 => Color::DarkGray, // comment
-                2 => Color::Magenta,  // constant
-                3 => Color::Yellow,   // function
-                4 => Color::Red,      // keyword
-                5 => Color::Magenta,  // number
-                6 => Color::White,    // operator
-                7 => Color::Cyan,     // property
-                8 => Color::Green,    // string
-                9 => Color::Blue,     // type
-                10 => Color::White,   // variable
-                _ => Color::White,    // default
-            },
-            Language::Php | Language::Ruby | Language::Bash | Language::Lua => match index {
-                0 => Color::Cyan,     // attribute
-                1 => Color::DarkGray, // comment
-                2 => Color::Magenta,  // constant
-                3 => Color::Yellow,   // function
-                4 => Color::Red,      // keyword
-                5 => Color::Magenta,  // number
-                6 => Color::White,    // operator
-                7 => Color::Cyan,     // property
-                8 => Color::Green,    // string
-                9 => Color::Blue,     // type
-                10 => Color::White,   // variable
-                _ => Color::White,    // default
-            },
-        }
+        let colors = match self {
+            Language::TypeScript => TYPESCRIPT_HIGHLIGHT_COLORS,
+            _ => DEFAULT_HIGHLIGHT_COLORS,
+        };
+        colors.get(index).copied().unwrap_or(Color::White)
     }
 }
 
