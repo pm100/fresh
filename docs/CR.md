@@ -1,7 +1,11 @@
 # Code Review
 
-- src/app/mod.rs:4121 — `handle_plugin_command` is ~1.1k lines of nested command handling in a single match. The monolith mixes text edits, overlays, status updates, and background process handling, making it very hard to reason about side effects or enforce invariants (e.g., when to append to event logs). Splitting into per-command helpers or a dispatch table would make the plugin surface safer to evolve.
-- src/app/mod.rs:3284 — `process_async_messages` spans ~680 lines and handles every async event (diagnostics, completions, hover, references, rename, etc.) inline. The size/branching make it easy to miss required UI updates or error handling for a new variant; consider breaking it into dedicated handlers per message type or delegating to modules.
+## Completed
+- ~~src/app/mod.rs:4121 — `handle_plugin_command` ~1.1k lines~~ → Refactored into `src/app/plugin_commands.rs` with 43 domain-grouped handlers
+- ~~src/services/plugins/runtime.rs:3299 and thread.rs:738 — duplicate `hook_args_to_json`~~ → Consolidated into `src/services/plugins/hooks.rs`
+- ~~src/app/mod.rs:3284 — `process_async_messages` ~680 lines~~ → Refactored into `src/app/async_messages.rs` with domain-grouped handlers (LSP, file system, file explorer, plugins)
+
+## Large Functions
 - src/view/ui/split_rendering.rs:1135 — `render_view_lines` is ~750 lines; consider breaking into smaller helpers for different rendering concerns.
 - src/app/render.rs:5 — top-level `render` runs ~450 lines covering layout calculation, plugin hook firing, file explorer rendering, and status/prompt UI. The amount of responsibility in one function hurts readability and testing; factoring into helpers (layout, plugin hook prep, explorer rendering, status/prompt rendering) would make regressions easier to spot.
 - src/services/lsp/async_handler.rs:1543 — `run` is ~490 lines long, combining RPC dispatch, stdout reader task setup, request bookkeeping, and response handling in one async function. This centralizes too many concerns; splitting request send/receive handling and server-driven callbacks would reduce complexity and make failure paths clearer.
@@ -9,7 +13,6 @@
 - src/input/keybindings.rs:376 — `Action::from_str` is a ~260-line string-to-enum match. A data-driven table would reduce boilerplate and avoid missing new actions when added to the enum.
 - src/input/commands.rs:89 — `get_all_commands` is a ~540-line literal list in one function. This is brittle to maintain (hard to diff/review additions) and couples command metadata to code; consider a data table or config-driven source with tests for completeness.
 - src/primitives/highlighter.rs:78 — `highlight_config` is ~450 lines of repetitive per-language setup; moving to a data table (language -> queries/config) would reduce duplication and make it harder to forget highlight names when adding languages.
-- src/services/plugins/runtime.rs:3299 and src/services/plugins/thread.rs:738 — two separate ~240-line `hook_args_to_json` implementations build JSON for hooks. Duplication means any new HookArgs variant or bug fix must be changed in both; extract a shared helper to keep the protocol consistent.
 - src/app/mod.rs:826 — `open_file` is ~300 lines combining path canonicalization, buffer reuse, binary detection, buffer creation, metadata setup, and LSP bootstrapping. The breadth and nesting make it easy to regress (e.g., mixing buffer lifecycle with LSP requests); splitting into focused helpers would improve safety.
 - src/config.rs:566 — `default_menus` is a 420-line literal definition. Consider moving menu data to structured config or a table to make changes easier to diff/test and to avoid bloating code with data.
 - src/view/viewport.rs:521 — `ensure_visible` runs ~230 lines of layout math and clamping in one method; breaking into smaller helpers (e.g., horizontal/vertical logic, scroll computations) would make correctness checks and future changes safer.

@@ -1,3 +1,4 @@
+mod async_messages;
 mod file_explorer;
 mod input;
 mod plugin_commands;
@@ -3295,39 +3296,7 @@ impl Editor {
         for message in messages {
             match message {
                 AsyncMessage::LspDiagnostics { uri, diagnostics } => {
-                    tracing::debug!(
-                        "Processing {} LSP diagnostics for {}",
-                        diagnostics.len(),
-                        uri
-                    );
-
-                    // Find the buffer for this URI by comparing URIs directly
-                    if let Ok(diagnostic_url) = uri.parse::<lsp_types::Uri>() {
-                        // Find buffer ID by matching URI
-                        if let Some((buffer_id, _)) = self
-                            .buffer_metadata
-                            .iter()
-                            .find(|(_, m)| m.file_uri() == Some(&diagnostic_url))
-                        {
-                            // Convert diagnostics to overlays
-                            if let Some(state) = self.buffers.get_mut(buffer_id) {
-                                crate::services::lsp::diagnostics::apply_diagnostics_to_state_cached(
-                                    state,
-                                    &diagnostics,
-                                    &self.theme,
-                                );
-                                tracing::info!(
-                                    "Applied {} diagnostics to buffer {:?}",
-                                    diagnostics.len(),
-                                    buffer_id
-                                );
-                            }
-                        } else {
-                            tracing::debug!("No buffer found for diagnostic URI: {}", uri);
-                        }
-                    } else {
-                        tracing::warn!("Could not parse diagnostic URI: {}", uri);
-                    }
+                    self.handle_lsp_diagnostics(uri, diagnostics);
                 }
                 AsyncMessage::LspInitialized { language } => {
                     tracing::info!("LSP server initialized for language: {}", language);
@@ -3390,268 +3359,36 @@ impl Editor {
                     diagnostics,
                     unchanged,
                 } => {
-                    // Handle pulled diagnostics (LSP 3.17+ pull model)
-                    if unchanged {
-                        tracing::debug!(
-                            "Diagnostics unchanged for {} (result_id: {:?})",
-                            uri,
-                            result_id
-                        );
-                        // No need to update - diagnostics haven't changed
-                    } else {
-                        tracing::debug!(
-                            "Processing {} pulled diagnostics for {} (result_id: {:?})",
-                            diagnostics.len(),
-                            uri,
-                            result_id
-                        );
-
-                        // Find the buffer for this URI
-                        if let Ok(diagnostic_url) = uri.parse::<lsp_types::Uri>() {
-                            if let Some((buffer_id, _)) = self
-                                .buffer_metadata
-                                .iter()
-                                .find(|(_, m)| m.file_uri() == Some(&diagnostic_url))
-                            {
-                                // Apply diagnostics to the buffer
-                                if let Some(state) = self.buffers.get_mut(buffer_id) {
-                                    crate::services::lsp::diagnostics::apply_diagnostics_to_state_cached(
-                                        state,
-                                        &diagnostics,
-                                        &self.theme,
-                                    );
-                                    tracing::info!(
-                                        "Applied {} pulled diagnostics to buffer {:?}",
-                                        diagnostics.len(),
-                                        buffer_id
-                                    );
-                                }
-                            } else {
-                                tracing::debug!(
-                                    "No buffer found for pulled diagnostic URI: {}",
-                                    uri
-                                );
-                            }
-                        } else {
-                            tracing::warn!("Could not parse pulled diagnostic URI: {}", uri);
-                        }
-                    }
-
-                    // Store result_id for incremental updates
-                    if let Some(result_id) = result_id {
-                        self.diagnostic_result_ids.insert(uri, result_id);
-                    }
+                    self.handle_lsp_pulled_diagnostics(uri, result_id, diagnostics, unchanged);
                 }
                 AsyncMessage::LspInlayHints {
                     request_id,
                     uri,
                     hints,
                 } => {
-                    // Handle inlay hints response
-                    if self.pending_inlay_hints_request == Some(request_id) {
-                        self.pending_inlay_hints_request = None;
-
-                        tracing::info!(
-                            "Received {} inlay hints for {} (request_id={})",
-                            hints.len(),
-                            uri,
-                            request_id
-                        );
-
-                        // Find the buffer for this URI and apply hints
-                        if let Ok(hint_url) = uri.parse::<lsp_types::Uri>() {
-                            if let Some((buffer_id, _)) = self
-                                .buffer_metadata
-                                .iter()
-                                .find(|(_, m)| m.file_uri() == Some(&hint_url))
-                            {
-                                if let Some(state) = self.buffers.get_mut(buffer_id) {
-                                    Self::apply_inlay_hints_to_state(state, &hints);
-                                    tracing::info!(
-                                        "Applied {} inlay hints as virtual text to buffer {:?}",
-                                        hints.len(),
-                                        buffer_id
-                                    );
-                                }
-                            } else {
-                                tracing::warn!("No buffer found for inlay hints URI: {}", uri);
-                            }
-                        } else {
-                            tracing::warn!("Could not parse inlay hints URI: {}", uri);
-                        }
-                    } else {
-                        tracing::debug!(
-                            "Ignoring stale inlay hints response (request_id={})",
-                            request_id
-                        );
-                    }
+                    self.handle_lsp_inlay_hints(request_id, uri, hints);
                 }
                 AsyncMessage::LspServerQuiescent { language } => {
-                    // rust-analyzer project is fully loaded - re-request inlay hints
-                    tracing::info!(
-                        "LSP ({}) project fully loaded, re-requesting inlay hints",
-                        language
-                    );
-
-                    // Re-request inlay hints for all open buffers with this language
-                    if let Some(lsp) = self.lsp.as_mut() {
-                        if let Some(client) = lsp.get_or_spawn(&language) {
-                            // Collect buffer info first to avoid borrow issues
-                            let buffer_infos: Vec<_> = self
-                                .buffer_metadata
-                                .iter()
-                                .filter_map(|(buffer_id, metadata)| {
-                                    if let Some(uri) = metadata.file_uri() {
-                                        let line_count = self
-                                            .buffers
-                                            .get(buffer_id)
-                                            .and_then(|s| s.buffer.line_count())
-                                            .unwrap_or(1000);
-                                        Some((uri.clone(), line_count))
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .collect();
-
-                            // Only request inlay hints if enabled
-                            if self.config.editor.enable_inlay_hints {
-                                for (uri, line_count) in buffer_infos {
-                                    let request_id = self.next_lsp_request_id;
-                                    self.next_lsp_request_id += 1;
-                                    self.pending_inlay_hints_request = Some(request_id);
-
-                                    let last_line = line_count.saturating_sub(1) as u32;
-                                    if let Err(e) = client.inlay_hints(
-                                        request_id,
-                                        uri.clone(),
-                                        0,
-                                        0,
-                                        last_line,
-                                        10000,
-                                    ) {
-                                        tracing::debug!(
-                                            "Failed to re-request inlay hints for {}: {}",
-                                            uri.as_str(),
-                                            e
-                                        );
-                                    } else {
-                                        tracing::info!(
-                                            "Re-requested inlay hints for {} (request_id={})",
-                                            uri.as_str(),
-                                            request_id
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    self.handle_lsp_server_quiescent(language);
                 }
                 AsyncMessage::FileChanged { path } => {
-                    use std::time::Duration;
-                    const DEBOUNCE_WINDOW: Duration = Duration::from_secs(10);
-                    const RAPID_REVERT_THRESHOLD: u32 = 10; // Require 10 reverts in 10 seconds to disable
-
-                    // Skip if auto-revert is disabled
-                    if !self.auto_revert_enabled {
-                        continue;
-                    }
-
-                    let path_buf = PathBuf::from(&path);
-
-                    // Only track events for files that are actually open in the editor
-                    let is_file_open = self
-                        .buffers
-                        .iter()
-                        .any(|(_, state)| state.buffer.file_path() == Some(&path_buf));
-
-                    if !is_file_open {
-                        // Ignore events for files that aren't open (e.g., vim temp files like "4913")
-                        tracing::debug!("Ignoring file change event for non-open file: {}", path);
-                        continue;
-                    }
-
-                    // Track rapid file change events - only disable after many reverts in short window
-                    if let Some((window_start, count)) =
-                        self.file_rapid_change_counts.get_mut(&path_buf)
-                    {
-                        if window_start.elapsed() < DEBOUNCE_WINDOW {
-                            *count += 1;
-
-                            if *count >= RAPID_REVERT_THRESHOLD {
-                                // Disable auto-revert and stop the file watcher
-                                self.auto_revert_enabled = false;
-                                self.file_watcher = None;
-                                self.watched_dirs.clear();
-                                self.status_message = Some(format!(
-                                    "Auto-revert disabled: {} is updating too frequently (use Ctrl+Shift+R to re-enable)",
-                                    path_buf.file_name().unwrap_or_default().to_string_lossy()
-                                ));
-                                tracing::info!(
-                                    "Auto-revert disabled for {:?} ({} reverts in {:?})",
-                                    path_buf,
-                                    count,
-                                    DEBOUNCE_WINDOW
-                                );
-                                continue;
-                            }
-                        } else {
-                            // Reset counter - start a new window
-                            *count = 1;
-                            *window_start = std::time::Instant::now();
-                        }
-                    } else {
-                        // First event for this file
-                        self.file_rapid_change_counts
-                            .insert(path_buf.clone(), (std::time::Instant::now(), 1));
-                    }
-
-                    tracing::info!("File changed externally: {}", path);
-                    self.handle_file_changed(&path);
+                    self.handle_async_file_changed(path);
                 }
                 AsyncMessage::GitStatusChanged { status } => {
                     tracing::info!("Git status changed: {}", status);
                     // TODO: Handle git status changes
                 }
-                AsyncMessage::FileExplorerInitialized(mut view) => {
-                    tracing::info!("File explorer initialized");
-
-                    // Load root .gitignore
-                    let root_id = view.tree().root_id();
-                    let root_path = view.tree().get_node(root_id).map(|n| n.entry.path.clone());
-
-                    if let Some(root_path) = root_path {
-                        if let Err(e) = view.load_gitignore_for_dir(&root_path) {
-                            tracing::warn!(
-                                "Failed to load root .gitignore from {:?}: {}",
-                                root_path,
-                                e
-                            );
-                        } else {
-                            tracing::debug!("Loaded root .gitignore from {:?}", root_path);
-                        }
-                    }
-
-                    self.file_explorer = Some(view);
-                    self.set_status_message("File explorer ready".to_string());
+                AsyncMessage::FileExplorerInitialized(view) => {
+                    self.handle_file_explorer_initialized(view);
                 }
                 AsyncMessage::FileExplorerToggleNode(node_id) => {
-                    // Async toggle completed - this message signals the operation is done
-                    tracing::debug!("File explorer toggle completed for node {:?}", node_id);
+                    self.handle_file_explorer_toggle_node(node_id);
                 }
                 AsyncMessage::FileExplorerRefreshNode(node_id) => {
-                    // Async refresh completed
-                    tracing::debug!("File explorer refresh completed for node {:?}", node_id);
-                    self.set_status_message("Refreshed".to_string());
+                    self.handle_file_explorer_refresh_node(node_id);
                 }
-                AsyncMessage::FileExplorerExpandedToPath(mut view) => {
-                    // File explorer has expanded to the active file path
-                    tracing::debug!("File explorer expanded to active file path");
-
-                    // Update scroll to ensure the selected file is visible
-                    view.update_scroll_for_selection();
-
-                    self.file_explorer = Some(view);
+                AsyncMessage::FileExplorerExpandedToPath(view) => {
+                    self.handle_file_explorer_expanded_to_path(view);
                 }
                 AsyncMessage::PluginProcessOutput {
                     process_id,
@@ -3659,192 +3396,45 @@ impl Editor {
                     stderr,
                     exit_code,
                 } => {
-                    // Plugin process completed - TypeScript uses native async/await, no callback needed
-                    tracing::debug!(
-                        "Process {} completed: exit_code={}, stdout_len={}, stderr_len={}",
-                        process_id,
-                        exit_code,
-                        stdout.len(),
-                        stderr.len()
-                    );
+                    self.handle_plugin_process_output(process_id, stdout, stderr, exit_code);
                 }
                 AsyncMessage::CustomNotification {
                     language,
                     method,
                     params,
                 } => {
-                    tracing::debug!("Custom LSP notification {} from {}", method, language);
-                    let payload = serde_json::json!({
-                        "language": language,
-                        "method": method,
-                        "params": params,
-                    });
-                    self.emit_event("lsp/custom_notification", payload);
+                    self.handle_custom_notification(language, method, params);
                 }
                 AsyncMessage::PluginLspResponse {
                     language: _,
                     request_id,
                     result,
                 } => {
-                    tracing::debug!("Received plugin LSP response (request_id={})", request_id);
-                    self.send_plugin_response(
-                        crate::services::plugins::api::PluginResponse::LspRequest {
-                            request_id,
-                            result,
-                        },
-                    );
+                    self.handle_plugin_lsp_response(request_id, result);
                 }
                 AsyncMessage::LspProgress {
                     language,
                     token,
                     value,
                 } => {
-                    use crate::services::async_bridge::LspProgressValue;
-                    match value {
-                        LspProgressValue::Begin {
-                            title,
-                            message,
-                            percentage,
-                        } => {
-                            // Store progress info
-                            self.lsp_progress.insert(
-                                token.clone(),
-                                LspProgressInfo {
-                                    language: language.clone(),
-                                    title,
-                                    message,
-                                    percentage,
-                                },
-                            );
-                            // Update LSP status to show progress
-                            self.update_lsp_status_from_progress();
-                        }
-                        LspProgressValue::Report {
-                            message,
-                            percentage,
-                        } => {
-                            // Update existing progress
-                            if let Some(info) = self.lsp_progress.get_mut(&token) {
-                                info.message = message;
-                                info.percentage = percentage;
-                                self.update_lsp_status_from_progress();
-                            }
-                        }
-                        LspProgressValue::End { .. } => {
-                            // Remove progress
-                            self.lsp_progress.remove(&token);
-                            self.update_lsp_status_from_progress();
-                        }
-                    }
+                    self.handle_lsp_progress(language, token, value);
                 }
                 AsyncMessage::LspWindowMessage {
                     language,
                     message_type,
                     message,
                 } => {
-                    // Add to window messages list
-                    self.lsp_window_messages.push(LspMessageEntry {
-                        language: language.clone(),
-                        message_type,
-                        message: message.clone(),
-                        timestamp: std::time::Instant::now(),
-                    });
-
-                    // Keep only last 100 messages
-                    if self.lsp_window_messages.len() > 100 {
-                        self.lsp_window_messages.remove(0);
-                    }
-
-                    // Show important messages in status bar
-                    use crate::services::async_bridge::LspMessageType;
-                    match message_type {
-                        LspMessageType::Error => {
-                            self.status_message = Some(format!("LSP ({}): {}", language, message));
-                        }
-                        LspMessageType::Warning => {
-                            self.status_message = Some(format!("LSP ({}): {}", language, message));
-                        }
-                        _ => {
-                            // Info and Log messages are not shown in status bar
-                        }
-                    }
+                    self.handle_lsp_window_message(language, message_type, message);
                 }
                 AsyncMessage::LspLogMessage {
                     language,
                     message_type,
                     message,
                 } => {
-                    // Add to log messages list
-                    self.lsp_log_messages.push(LspMessageEntry {
-                        language,
-                        message_type,
-                        message,
-                        timestamp: std::time::Instant::now(),
-                    });
-
-                    // Keep only last 500 log messages
-                    if self.lsp_log_messages.len() > 500 {
-                        self.lsp_log_messages.remove(0);
-                    }
+                    self.handle_lsp_log_message(language, message_type, message);
                 }
                 AsyncMessage::LspStatusUpdate { language, status } => {
-                    // Get old status for event
-                    let old_status = self.lsp_server_statuses.get(&language).cloned();
-                    // Update server status
-                    self.lsp_server_statuses
-                        .insert(language.clone(), status.clone());
-                    self.update_lsp_status_from_server_statuses();
-
-                    // Handle server crash - trigger auto-restart
-                    if status == crate::services::async_bridge::LspServerStatus::Error {
-                        // Only trigger restart if transitioning to error from a running state
-                        let was_running = old_status
-                            .map(|s| {
-                                matches!(
-                                    s,
-                                    crate::services::async_bridge::LspServerStatus::Running
-                                        | crate::services::async_bridge::LspServerStatus::Initializing
-                                )
-                            })
-                            .unwrap_or(false);
-
-                        if was_running {
-                            if let Some(lsp) = self.lsp.as_mut() {
-                                let message = lsp.handle_server_crash(&language);
-                                self.status_message = Some(message);
-                            }
-                        }
-                    }
-
-                    // Emit control event
-                    let status_str = match status {
-                        crate::services::async_bridge::LspServerStatus::Starting => "starting",
-                        crate::services::async_bridge::LspServerStatus::Initializing => {
-                            "initializing"
-                        }
-                        crate::services::async_bridge::LspServerStatus::Running => "running",
-                        crate::services::async_bridge::LspServerStatus::Error => "error",
-                        crate::services::async_bridge::LspServerStatus::Shutdown => "shutdown",
-                    };
-                    let old_status_str = old_status
-                        .map(|s| match s {
-                            crate::services::async_bridge::LspServerStatus::Starting => "starting",
-                            crate::services::async_bridge::LspServerStatus::Initializing => {
-                                "initializing"
-                            }
-                            crate::services::async_bridge::LspServerStatus::Running => "running",
-                            crate::services::async_bridge::LspServerStatus::Error => "error",
-                            crate::services::async_bridge::LspServerStatus::Shutdown => "shutdown",
-                        })
-                        .unwrap_or("none");
-                    self.emit_event(
-                        crate::model::control_event::events::LSP_STATUS_CHANGED.name,
-                        serde_json::json!({
-                            "language": language,
-                            "old_status": old_status_str,
-                            "status": status_str
-                        }),
-                    );
+                    self.handle_lsp_status_update(language, status);
                 }
             }
         }
@@ -3854,111 +3444,13 @@ impl Editor {
         self.update_plugin_state_snapshot();
 
         // Process TypeScript plugin commands
-        let mut processed_any_commands = false;
-        if let Some(ref mut manager) = self.ts_plugin_manager {
-            let commands = manager.process_commands();
-            if !commands.is_empty() {
-                tracing::trace!(
-                    "process_plugin_commands: processing {} commands",
-                    commands.len()
-                );
-                processed_any_commands = true;
-                for command in commands {
-                    tracing::trace!(
-                        "process_plugin_commands: handling command {:?}",
-                        std::mem::discriminant(&command)
-                    );
-                    if let Err(e) = self.handle_plugin_command(command) {
-                        tracing::error!("Error handling TypeScript plugin command: {}", e);
-                    }
-                }
-            }
-        } else {
-            tracing::trace!("process_async_messages: no plugin manager");
-        }
+        let processed_any_commands = self.process_plugin_commands();
 
         // Process pending plugin action completions
-        // Retain only actions that haven't completed yet
-        self.pending_plugin_actions
-            .retain(|(action_name, receiver)| {
-                match receiver.try_recv() {
-                    Ok(result) => {
-                        match result {
-                            Ok(()) => {
-                                tracing::info!(
-                                    "Plugin action '{}' executed successfully",
-                                    action_name
-                                );
-                            }
-                            Err(e) => {
-                                tracing::error!("Plugin action '{}' error: {}", action_name, e);
-                            }
-                        }
-                        false // Remove completed action
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Empty) => {
-                        true // Keep pending action
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        tracing::error!(
-                            "Plugin thread disconnected during action '{}'",
-                            action_name
-                        );
-                        false // Remove disconnected action
-                    }
-                }
-            });
+        self.process_pending_plugin_actions();
 
         // Process pending LSP server restarts (with exponential backoff)
-        if let Some(lsp) = self.lsp.as_mut() {
-            let restart_results = lsp.process_pending_restarts();
-            for (language, success, message) in restart_results {
-                self.status_message = Some(message.clone());
-
-                // If restart was successful, we need to re-notify about open documents
-                if success {
-                    // Find all open buffers for this language and re-send didOpen
-                    let buffers_for_language: Vec<_> = self
-                        .buffer_metadata
-                        .iter()
-                        .filter_map(|(buf_id, meta)| {
-                            if let Some(path) = meta.file_path() {
-                                if crate::services::lsp::manager::detect_language(path)
-                                    == Some(language.clone())
-                                {
-                                    Some((*buf_id, path.clone()))
-                                } else {
-                                    None
-                                }
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-
-                    // Re-send didOpen for each buffer
-                    for (buffer_id, path) in buffers_for_language {
-                        if let Some(state) = self.buffers.get(&buffer_id) {
-                            let content = state.buffer.to_string();
-                            let uri: Option<lsp_types::Uri> = url::Url::from_file_path(&path)
-                                .ok()
-                                .and_then(|u| u.as_str().parse::<lsp_types::Uri>().ok());
-                            if let Some(uri) = uri {
-                                if let Some(lang_id) =
-                                    crate::services::lsp::manager::detect_language(&path)
-                                {
-                                    if let Some(lsp) = self.lsp.as_mut() {
-                                        if let Some(handle) = lsp.get_or_spawn(&lang_id) {
-                                            let _ = handle.did_open(uri, content, lang_id);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        self.process_pending_lsp_restarts();
 
         // Check and clear the plugin render request flag
         let plugin_render = self.plugin_render_requested;
