@@ -307,6 +307,8 @@ pub struct Editor {
     search_case_sensitive: bool,
     search_whole_word: bool,
     search_use_regex: bool,
+    /// Whether to confirm each replacement (interactive/query-replace mode)
+    search_confirm_each: bool,
 
     /// Macro storage (key -> list of recorded actions)
     macros: HashMap<char, Vec<Action>>,
@@ -671,6 +673,7 @@ impl Editor {
             search_case_sensitive: true,
             search_whole_word: false,
             search_use_regex: false,
+            search_confirm_each: false,
             macros: HashMap::new(),
             macro_recording: None,
             last_macro_register: None,

@@ -420,12 +420,14 @@ impl StatusBarRenderer {
     /// - Case Sensitive (Alt+C)
     /// - Whole Word (Alt+W)
     /// - Regex (Alt+R)
+    /// - Confirm Each (Alt+I) - only shown in replace mode
     pub fn render_search_options(
         frame: &mut Frame,
         area: Rect,
         case_sensitive: bool,
         whole_word: bool,
         use_regex: bool,
+        confirm_each: Option<bool>, // None = don't show, Some(value) = show with this state
         theme: &crate::view::theme::Theme,
         keybindings: &crate::input::keybindings::KeybindingResolver,
     ) {
@@ -530,6 +532,34 @@ impl StatusBarRenderer {
             format!("({})", regex_shortcut),
             shortcut_style,
         ));
+
+        // Confirm Each option (only shown in replace mode)
+        if let Some(confirm_value) = confirm_each {
+            let confirm_shortcut = keybindings
+                .get_keybinding_for_action(
+                    &crate::input::keybindings::Action::ToggleSearchConfirmEach,
+                    crate::input::keybindings::KeyContext::Prompt,
+                )
+                .or_else(|| {
+                    keybindings.get_keybinding_for_action(
+                        &crate::input::keybindings::Action::ToggleSearchConfirmEach,
+                        crate::input::keybindings::KeyContext::Global,
+                    )
+                })
+                .unwrap_or_else(|| "Alt+I".to_string());
+
+            let confirm_checkbox = if confirm_value { "[x]" } else { "[ ]" };
+
+            // Separator
+            spans.push(Span::styled("   ", base_style));
+
+            spans.push(Span::styled(
+                confirm_checkbox,
+                if confirm_value { active_style } else { base_style },
+            ));
+            spans.push(Span::styled(" Confirm ", base_style));
+            spans.push(Span::styled(format!("({})", confirm_shortcut), shortcut_style));
+        }
 
         // Fill remaining space
         let current_width: usize = spans.iter().map(|s| s.content.len()).sum();

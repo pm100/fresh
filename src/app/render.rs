@@ -361,12 +361,28 @@ impl Editor {
 
         // Render search options bar when in search prompt
         if show_search_options {
+            // Show "Confirm" option only in replace modes
+            let confirm_each = self.prompt.as_ref().and_then(|p| {
+                if matches!(
+                    p.prompt_type,
+                    PromptType::ReplaceSearch
+                        | PromptType::Replace { .. }
+                        | PromptType::QueryReplaceSearch
+                        | PromptType::QueryReplace { .. }
+                ) {
+                    Some(self.search_confirm_each)
+                } else {
+                    None
+                }
+            });
+
             StatusBarRenderer::render_search_options(
                 frame,
                 main_chunks[search_options_idx],
                 self.search_case_sensitive,
                 self.search_whole_word,
                 self.search_use_regex,
+                confirm_each,
                 &theme,
                 &keybindings_cloned,
             );

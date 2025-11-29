@@ -1596,6 +1596,7 @@ pub fn action_to_events(
         | Action::ToggleSearchCaseSensitive
         | Action::ToggleSearchWholeWord
         | Action::ToggleSearchRegex
+        | Action::ToggleSearchConfirmEach
         | Action::StartMacroRecording
         | Action::StopMacroRecording
         | Action::PlayMacro(_)

@@ -971,9 +971,12 @@ impl Editor {
                 }
             }
             Action::Replace => {
+                // Use same flow as query-replace, just with confirm_each defaulting to false
                 self.start_search_prompt("Replace: ".to_string(), PromptType::ReplaceSearch, false);
             }
             Action::QueryReplace => {
+                // Enable confirm mode by default for query-replace
+                self.search_confirm_each = true;
                 self.start_search_prompt(
                     "Query replace: ".to_string(),
                     PromptType::QueryReplaceSearch,
@@ -1288,6 +1291,15 @@ impl Editor {
                     self.perform_search(&query);
                 }
             }
+            Action::ToggleSearchConfirmEach => {
+                self.search_confirm_each = !self.search_confirm_each;
+                let state = if self.search_confirm_each {
+                    "enabled"
+                } else {
+                    "disabled"
+                };
+                self.set_status_message(format!("Confirm each replacement {}", state));
+            }
             Action::StartMacroRecording => {
                 // This is a no-op; use ToggleMacroRecording instead
                 self.set_status_message(
@@ -1463,7 +1475,12 @@ impl Editor {
                             );
                         }
                         PromptType::Replace { search } => {
-                            self.perform_replace(&search, &input);
+                            // Use interactive or batch replace based on confirm_each flag
+                            if self.search_confirm_each {
+                                self.start_interactive_replace(&search, &input);
+                            } else {
+                                self.perform_replace(&search, &input);
+                            }
                         }
                         PromptType::QueryReplaceSearch => {
                             self.perform_search(&input);
@@ -1475,7 +1492,12 @@ impl Editor {
                             );
                         }
                         PromptType::QueryReplace { search } => {
-                            self.start_interactive_replace(&search, &input);
+                            // Use interactive or batch replace based on confirm_each flag
+                            if self.search_confirm_each {
+                                self.start_interactive_replace(&search, &input);
+                            } else {
+                                self.perform_replace(&search, &input);
+                            }
                         }
                         PromptType::Command => {
                             let commands = self.command_registry.read().unwrap().get_all();
