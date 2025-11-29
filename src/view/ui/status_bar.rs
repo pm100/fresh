@@ -524,7 +524,7 @@ impl StatusBarRenderer {
                 confirm_checkbox,
                 if confirm_value { active_style } else { base_style },
             ));
-            spans.push(Span::styled(" Confirm", base_style));
+            spans.push(Span::styled(" Confirm each", base_style));
             if let Some(shortcut) = &confirm_shortcut {
                 spans.push(Span::styled(format!(" ({})", shortcut), shortcut_style));
             }

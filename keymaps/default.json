@@ -1195,6 +1195,13 @@
       "when": "prompt"
     },
     {
+      "key": "e",
+      "modifiers": ["alt"],
+      "action": "toggle_search_confirm_each",
+      "args": {},
+      "when": "prompt"
+    },
+    {
       "comment": "Popup context - Navigation",
       "key": "Up",
       "modifiers": [],
