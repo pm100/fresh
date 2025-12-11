@@ -43,6 +43,7 @@ Fresh is engineered for speed. It delivers a low-latency experience, with text a
 | Fedora/RHEL | [.rpm](#fedorarhelopensuse-rpm) |
 | All platforms | [Pre-built binaries](#pre-built-binaries) |
 | npm | [npm / npx](#npm) |
+| Rust users (Fast) | [cargo-binstall](#using-cargo-binstall) |
 | Rust users | [crates.io](#from-cratesio) |
 | Developers | [From source](#from-source) |
 
@@ -93,6 +94,22 @@ Or try it without installing:
 
 ```bash
 npx @fresh-editor/fresh-editor
+```
+
+### Using cargo-binstall
+
+To install the binary directly without compiling (much faster than crates.io):
+
+First, install cargo-binstall if you haven't already
+
+```bash
+cargo install cargo-binstall
+```
+
+Then install fresh
+
+```bash
+cargo binstall fresh-editor
 ```
 
 ### From crates.io
