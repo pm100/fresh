@@ -784,7 +784,6 @@ fn test_enter_opens_file_and_switches_focus() {
 
 /// Test Feature 3: Project directory should be expanded when file explorer first opens
 #[test]
-#[ignore]
 fn test_project_directory_expanded_on_open() {
     let mut harness = EditorTestHarness::with_temp_project(120, 40).unwrap();
     let project_root = harness.project_dir().unwrap();
@@ -800,6 +799,14 @@ fn test_project_directory_expanded_on_open() {
     let _ = harness.editor_mut().process_async_messages();
     std::thread::sleep(std::time::Duration::from_millis(100));
     let _ = harness.editor_mut().process_async_messages();
+
+    // now switch to editor so cursor doesnt upset expolere display
+    harness.editor_mut().focus_editor();
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let _ = harness.editor_mut().process_async_messages();
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let _ = harness.editor_mut().process_async_messages();
+
     harness.render().unwrap();
 
     let screen = harness.screen_to_string();
