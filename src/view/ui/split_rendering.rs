@@ -9,6 +9,7 @@ use crate::model::cursor::SelectionMode;
 use crate::model::event::{BufferId, EventLog, SplitDirection};
 use crate::primitives::ansi::AnsiParser;
 use crate::primitives::ansi_background::AnsiBackground;
+use crate::primitives::display_width::char_width;
 use crate::services::plugins::api::ViewTransformPayload;
 use crate::state::{EditorState, ViewMode};
 use crate::view::split::SplitManager;
@@ -35,8 +36,14 @@ fn push_span_with_map(
     if text.is_empty() {
         return;
     }
-    for _ in text.chars() {
-        map.push(source);
+    // Push one map entry per visual column (not per character)
+    // Double-width characters (CJK, emoji) need 2 entries
+    // Zero-width characters (like \u{200b}) get 0 entries - they don't occupy screen space
+    for ch in text.chars() {
+        let width = char_width(ch);
+        for _ in 0..width {
+            map.push(source);
+        }
     }
     spans.push(Span::styled(text, style));
 }
@@ -984,9 +991,11 @@ impl SplitRenderer {
         // Convert tokens to display lines using the view pipeline
         // Each ViewLine preserves LineStart info for correct line number rendering
         // Use binary mode if the buffer contains binary content
+        // Enable ANSI awareness for non-binary content to handle escape sequences correctly
         let is_binary = state.buffer.is_binary();
+        let ansi_aware = !is_binary; // ANSI parsing for normal text files
         let source_lines: Vec<ViewLine> =
-            ViewLineIterator::with_binary_mode(&tokens, is_binary).collect();
+            ViewLineIterator::with_options(&tokens, is_binary, ansi_aware).collect();
 
         // Inject virtual lines (LineAbove/LineBelow) from VirtualTextManager
         let lines = Self::inject_virtual_lines(source_lines, state);
@@ -1019,10 +1028,14 @@ impl SplitRenderer {
 
         ViewLine {
             text,
-            // All None - no source mapping (this is injected content)
-            char_mappings: vec![None; len],
+            // Per-character data: all None - no source mapping (this is injected content)
+            char_source_bytes: vec![None; len],
             // All have the virtual text's style
             char_styles: vec![Some(token_style); len],
+            // Visual column positions for each character (0, 1, 2, ...)
+            char_visual_cols: (0..len).collect(),
+            // Per-visual-column: each column maps to its corresponding character
+            visual_to_char: (0..len).collect(),
             tab_starts: HashSet::new(),
             // AfterInjectedNewline means no line number will be shown
             line_start: LineStart::AfterInjectedNewline,
@@ -1037,11 +1050,11 @@ impl SplitRenderer {
         // Get viewport byte range from source lines
         let viewport_start = source_lines
             .first()
-            .and_then(|l| l.char_mappings.iter().find_map(|m| *m))
+            .and_then(|l| l.char_source_bytes.iter().find_map(|m| *m))
             .unwrap_or(0);
         let viewport_end = source_lines
             .last()
-            .and_then(|l| l.char_mappings.iter().rev().find_map(|m| *m))
+            .and_then(|l| l.char_source_bytes.iter().rev().find_map(|m| *m))
             .map(|b| b + 1)
             .unwrap_or(viewport_start);
 
@@ -1062,9 +1075,9 @@ impl SplitRenderer {
 
         for source_line in source_lines {
             // Get this line's byte range
-            let line_start_byte = source_line.char_mappings.iter().find_map(|m| *m);
+            let line_start_byte = source_line.char_source_bytes.iter().find_map(|m| *m);
             let line_end_byte = source_line
-                .char_mappings
+                .char_source_bytes
                 .iter()
                 .rev()
                 .find_map(|m| *m)
@@ -1515,7 +1528,7 @@ impl SplitRenderer {
         // Walk backwards to include any injected content (headers) that precede it
         for (idx, line) in view_lines.iter().enumerate() {
             // Check if this line has source content at or after top_byte
-            if let Some(first_source) = line.char_mappings.iter().find_map(|m| *m) {
+            if let Some(first_source) = line.char_source_bytes.iter().find_map(|m| *m) {
                 if first_source >= top_byte {
                     // Found a line with source >= top_byte
                     // But we may need to include previous lines if they're injected headers
@@ -1523,7 +1536,8 @@ impl SplitRenderer {
                     while start_idx > 0 {
                         let prev_line = &view_lines[start_idx - 1];
                         // If previous line is all injected (no source mappings), include it
-                        let prev_has_source = prev_line.char_mappings.iter().any(|m| m.is_some());
+                        let prev_has_source =
+                            prev_line.char_source_bytes.iter().any(|m| m.is_some());
                         if !prev_has_source {
                             start_idx -= 1;
                         } else {
@@ -1851,8 +1865,10 @@ impl SplitRenderer {
                 static EMPTY_LINE: std::sync::OnceLock<ViewLine> = std::sync::OnceLock::new();
                 EMPTY_LINE.get_or_init(|| ViewLine {
                     text: String::new(),
-                    char_mappings: Vec::new(),
+                    char_source_bytes: Vec::new(),
                     char_styles: Vec::new(),
+                    char_visual_cols: Vec::new(),
+                    visual_to_char: Vec::new(),
                     tab_starts: HashSet::new(),
                     line_start: LineStart::Beginning,
                     ends_with_newline: false,
@@ -1864,10 +1880,17 @@ impl SplitRenderer {
             // Extract line data
             let line_content = current_view_line.text.clone();
             let line_has_newline = current_view_line.ends_with_newline;
-            let line_char_mappings = &current_view_line.char_mappings;
+            let line_char_source_bytes = &current_view_line.char_source_bytes;
             let line_char_styles = &current_view_line.char_styles;
+            let line_visual_to_char = &current_view_line.visual_to_char;
             let line_tab_starts = &current_view_line.tab_starts;
             let _line_start_type = current_view_line.line_start; // Available for future use
+
+            // Helper to get source byte at a visual column using the new O(1) lookup
+            let source_byte_at_col = |vis_col: usize| -> Option<usize> {
+                let char_idx = line_visual_to_char.get(vis_col).copied()?;
+                line_char_source_bytes.get(char_idx).copied().flatten()
+            };
 
             view_iter_idx += 1;
 
@@ -1922,8 +1945,9 @@ impl SplitRenderer {
             );
 
             // Check if this line has any selected text
-            let mut char_index = 0;
-            let mut col_offset = 0usize;
+            let mut byte_index = 0; // Byte offset in line_content string
+            let mut display_char_idx = 0usize; // Character index in text (for char_source_bytes)
+            let mut col_offset = 0usize; // Visual column position
 
             // Performance optimization: For very long lines, only process visible characters
             // Calculate the maximum characters we might need to render based on screen width
@@ -1955,8 +1979,12 @@ impl SplitRenderer {
 
             let mut chars_iterator = line_content.chars().peekable();
             while let Some(ch) = chars_iterator.next() {
-                // Use per-line mappings instead of global view_mapping
-                let byte_pos = line_char_mappings.get(col_offset).copied().flatten();
+                // Get source byte for this character using character index
+                // (char_source_bytes is indexed by character position, not visual column)
+                let byte_pos = line_char_source_bytes
+                    .get(display_char_idx)
+                    .copied()
+                    .flatten();
 
                 // Process character through ANSI parser first (if line has ANSI)
                 // If parser returns None, the character is part of an escape sequence and should be skipped
@@ -1965,6 +1993,7 @@ impl SplitRenderer {
                         Some(style) => style,
                         None => {
                             // This character is part of an ANSI escape sequence, skip it
+                            // ANSI escape chars have zero visual width, so don't increment col_offset
                             // IMPORTANT: If the cursor is on this ANSI byte, track it
                             if let Some(bp) = byte_pos {
                                 if bp == primary_cursor_position && !have_cursor {
@@ -1974,8 +2003,9 @@ impl SplitRenderer {
                                     have_cursor = true;
                                 }
                             }
-                            char_index += ch.len_utf8();
-                            col_offset += 1;
+                            byte_index += ch.len_utf8();
+                            display_char_idx += 1;
+                            // Note: col_offset not incremented - ANSI chars have 0 visual width
                             continue;
                         }
                     }
@@ -1985,13 +2015,13 @@ impl SplitRenderer {
                 };
 
                 // Performance: skip expensive style calculations for characters beyond visible range
-                // Use visible_char_count (not char_index) since ANSI codes don't take up visible space
+                // Use visible_char_count (not byte_index) since ANSI codes don't take up visible space
                 if visible_char_count > max_chars_to_process {
                     // Fast path: just count remaining characters without processing
                     // This is critical for performance with very long lines (e.g., 100KB single line)
-                    char_index += ch.len_utf8();
+                    byte_index += ch.len_utf8();
                     for remaining_ch in chars_iterator.by_ref() {
-                        char_index += remaining_ch.len_utf8();
+                        byte_index += remaining_ch.len_utf8();
                     }
                     break;
                 }
@@ -2010,12 +2040,12 @@ impl SplitRenderer {
                                 return false;
                             }
                             // If this byte maps to a tab character, only show cursor at tab_start
-                            // Check if this is part of a tab expansion by looking at surrounding positions
-                            let prev_col_offset = col_offset.saturating_sub(1);
+                            // Check if this is part of a tab expansion by looking at previous char
+                            let prev_char_idx = display_char_idx.saturating_sub(1);
                             let prev_byte_pos =
-                                line_char_mappings.get(prev_col_offset).copied().flatten();
+                                line_char_source_bytes.get(prev_char_idx).copied().flatten();
                             // Show cursor if: this is start of line, OR previous char had different byte pos
-                            col_offset == 0 || prev_byte_pos != Some(bp)
+                            display_char_idx == 0 || prev_byte_pos != Some(bp)
                         })
                         .unwrap_or(false);
 
@@ -2025,8 +2055,8 @@ impl SplitRenderer {
                         |(start_line, start_col, end_line, end_col)| {
                             current_source_line_num >= *start_line
                                 && current_source_line_num <= *end_line
-                                && char_index >= *start_col
-                                && char_index <= *end_col
+                                && byte_index >= *start_col
+                                && byte_index <= *end_col
                         },
                     );
 
@@ -2037,7 +2067,10 @@ impl SplitRenderer {
                         || (!is_cursor && is_in_block_selection);
 
                     // Compute character style using helper function
-                    let token_style = line_char_styles.get(col_offset).and_then(|s| s.as_ref());
+                    // char_styles is indexed by character position, not visual column
+                    let token_style = line_char_styles
+                        .get(display_char_idx)
+                        .and_then(|s| s.as_ref());
                     let CharStyleOutput {
                         style,
                         is_secondary_cursor,
@@ -2101,6 +2134,18 @@ impl SplitRenderer {
                         );
                     }
 
+                    // Track cursor position for zero-width characters
+                    // Zero-width chars don't get map entries, so we need to explicitly record cursor pos
+                    if !have_cursor {
+                        if let Some(bp) = byte_pos {
+                            if bp == primary_cursor_position && char_width(ch) == 0 {
+                                cursor_screen_x = gutter_width as u16 + visible_char_count as u16;
+                                cursor_screen_y = lines.len() as u16;
+                                have_cursor = true;
+                            }
+                        }
+                    }
+
                     if let Some(bp) = byte_pos {
                         if let Some(vtexts) = virtual_text_lookup.get(&bp) {
                             for vtext in vtexts
@@ -2144,9 +2189,13 @@ impl SplitRenderer {
                     }
                 }
 
-                char_index += ch.len_utf8();
-                col_offset += 1;
-                visible_char_count += 1;
+                byte_index += ch.len_utf8();
+                display_char_idx += 1; // Increment character index for next lookup
+                                       // col_offset tracks visual column position (for indexing into visual_to_char)
+                                       // visual_to_char has one entry per visual column, not per character
+                let ch_width = char_width(ch);
+                col_offset += ch_width;
+                visible_char_count += ch_width;
             }
 
             // Set last_seg_y early so cursor detection works for both empty and non-empty lines
@@ -2160,12 +2209,13 @@ impl SplitRenderer {
             if !line_has_newline {
                 let line_len_chars = line_content.chars().count();
 
-                // Map view positions to buffer positions using per-line char_mappings
+                // Map view positions to buffer positions using per-line char_source_bytes
                 let last_char_idx = line_len_chars.saturating_sub(1);
                 let after_last_char_idx = line_len_chars;
 
-                let last_char_buf_pos = line_char_mappings.get(last_char_idx).copied().flatten();
-                let after_last_char_buf_pos = line_char_mappings
+                let last_char_buf_pos =
+                    line_char_source_bytes.get(last_char_idx).copied().flatten();
+                let after_last_char_buf_pos = line_char_source_bytes
                     .get(after_last_char_idx)
                     .copied()
                     .flatten();
@@ -2276,7 +2326,7 @@ impl SplitRenderer {
 
                 if line_has_newline && line_len_chars > 0 {
                     let newline_idx = line_len_chars.saturating_sub(1);
-                    if let Some(Some(src_newline)) = line_char_mappings.get(newline_idx) {
+                    if let Some(Some(src_newline)) = line_char_source_bytes.get(newline_idx) {
                         if *src_newline == primary_cursor_position {
                             // Cursor position now includes gutter width (consistent with main cursor tracking)
                             // For empty lines (just newline), cursor should be at gutter width (after gutter)
@@ -2637,23 +2687,45 @@ impl SplitRenderer {
     }
 
     /// Extract ViewLineMapping from rendered view lines
-    /// This captures the char_mappings from each ViewLine for accurate mouse click positioning
+    /// This captures the char_source_bytes and visual_to_char from each ViewLine
+    /// for accurate mouse click positioning with O(1) lookup
     fn extract_view_line_mappings(view_lines: &[ViewLine]) -> Vec<ViewLineMapping> {
+        tracing::debug!(
+            "extract_view_line_mappings: {} view_lines",
+            view_lines.len()
+        );
+        for (i, vl) in view_lines.iter().enumerate().take(5) {
+            let first_bytes: Vec<_> = vl.char_source_bytes.iter().take(5).collect();
+            tracing::debug!(
+                "  ViewLine {}: text={:?} (len={}), first_source_bytes={:?}",
+                i,
+                vl.text.chars().take(20).collect::<String>(),
+                vl.text.len(),
+                first_bytes
+            );
+        }
         view_lines
             .iter()
             .map(|vl| {
-                // line_end_byte is the last valid mapping in char_mappings.
-                // For lines ending with newline, this IS the newline position.
-                // For wrapped continuations, this is the last char before the wrap.
-                let line_end_byte = vl
-                    .char_mappings
-                    .iter()
-                    .filter_map(|m| *m)
-                    .last()
-                    .unwrap_or(0);
+                // line_end_byte should be the position AFTER the last character
+                // char_source_bytes stores START positions of characters, so we need to
+                // add the byte length of the last character
+                let line_end_byte = if let Some(&Some(last_byte_start)) =
+                    vl.char_source_bytes.iter().rev().find(|m| m.is_some())
+                {
+                    // Get the last char from text to find its byte length
+                    if let Some(last_char) = vl.text.chars().last() {
+                        last_byte_start + last_char.len_utf8()
+                    } else {
+                        last_byte_start
+                    }
+                } else {
+                    0
+                };
 
                 ViewLineMapping {
-                    char_mappings: vl.char_mappings.clone(),
+                    char_source_bytes: vl.char_source_bytes.clone(),
+                    visual_to_char: vl.visual_to_char.clone(),
                     line_end_byte,
                 }
             })
@@ -2752,6 +2824,7 @@ impl SplitRenderer {
 mod tests {
     use super::*;
     use crate::model::buffer::Buffer;
+    use crate::primitives::display_width::str_width;
     use crate::view::theme::Theme;
     use crate::view::viewport::Viewport;
 
@@ -2922,8 +2995,8 @@ mod tests {
                     // Found a visual cursor - record its position
                     cursor_positions.push((col, line_idx as u16));
                 }
-                // Count the width of this span's content
-                col += span.content.chars().count() as u16;
+                // Count the visual width of this span's content
+                col += str_width(&span.content) as u16;
             }
         }
 

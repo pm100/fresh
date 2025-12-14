@@ -780,6 +780,10 @@ fn test_scrollbar_drag_to_absolute_bottom() {
 fn test_horizontal_split_separator_drag_resize() {
     let mut harness = EditorTestHarness::new(80, 24).unwrap();
 
+    // Delay to avoid double-click detection (use config value * 2 for safety margin)
+    let double_click_delay =
+        std::time::Duration::from_millis(harness.config().editor.double_click_time_ms * 2);
+
     // Create horizontal split via command palette
     harness
         .send_key(KeyCode::Char('p'), KeyModifiers::CONTROL)
@@ -830,6 +834,9 @@ fn test_horizontal_split_separator_drag_resize() {
         "Ratio should increase after dragging separator down. Was {initial_ratio}, now {new_ratio}"
     );
 
+    // Wait to avoid double-click detection
+    std::thread::sleep(double_click_delay);
+
     // Drag the separator up (decreases top split size)
     let separators_after = harness.editor().get_separator_areas().to_vec();
     let (_, _, sep_x_new, sep_y_new, sep_length_new) = separators_after[0];
@@ -854,6 +861,10 @@ fn test_horizontal_split_separator_drag_resize() {
 #[test]
 fn test_vertical_split_separator_drag_resize() {
     let mut harness = EditorTestHarness::new(80, 24).unwrap();
+
+    // Delay to avoid double-click detection (use config value * 2 for safety margin)
+    let double_click_delay =
+        std::time::Duration::from_millis(harness.config().editor.double_click_time_ms * 2);
 
     // Create vertical split via command palette
     harness
@@ -904,6 +915,9 @@ fn test_vertical_split_separator_drag_resize() {
         "Ratio should increase after dragging separator right. Was {initial_ratio}, now {new_ratio}"
     );
 
+    // Wait to avoid double-click detection
+    std::thread::sleep(double_click_delay);
+
     // Drag the separator left (decreases left split size)
     let separators_after = harness.editor().get_separator_areas().to_vec();
     let (_, _, sep_x_new, sep_y_new, sep_length_new) = separators_after[0];
@@ -928,6 +942,10 @@ fn test_vertical_split_separator_drag_resize() {
 #[test]
 fn test_split_separator_drag_respects_limits() {
     let mut harness = EditorTestHarness::new(80, 24).unwrap();
+
+    // Delay to avoid double-click detection (use config value * 2 for safety margin)
+    let double_click_delay =
+        std::time::Duration::from_millis(harness.config().editor.double_click_time_ms * 2);
 
     // Create horizontal split
     harness
@@ -960,6 +978,9 @@ fn test_split_separator_drag_respects_limits() {
         max_ratio >= 0.8,
         "Ratio should be close to maximum after extreme drag down, got {max_ratio}"
     );
+
+    // Wait to avoid double-click detection
+    std::thread::sleep(double_click_delay);
 
     // Drag extremely far up (should clamp to min 0.1)
     let separators_after = harness.editor().get_separator_areas().to_vec();
@@ -1258,6 +1279,10 @@ fn test_drag_to_select_multiple_lines() {
 fn test_click_clears_selection() {
     let mut harness = EditorTestHarness::new(80, 24).unwrap();
 
+    // Delay to avoid double-click detection (use config value * 2 for safety margin)
+    let double_click_delay =
+        std::time::Duration::from_millis(harness.config().editor.double_click_time_ms * 2);
+
     let content = "Some text to select\n";
     let _fixture = harness.load_buffer_from_text(content).unwrap();
     harness.render().unwrap();
@@ -1270,6 +1295,9 @@ fn test_click_clears_selection() {
     harness.render().unwrap();
 
     assert!(harness.has_selection(), "Should have selection after drag");
+
+    // Wait to avoid double-click detection
+    std::thread::sleep(double_click_delay);
 
     // Click somewhere else to clear selection
     harness.mouse_click(12, row).unwrap();
@@ -1621,5 +1649,93 @@ fn test_mouse_click_below_last_line_positions_on_last_line() {
     println!(
         "SUCCESS: Cursor is on the last line at position {}",
         cursor_pos
+    );
+}
+
+/// Test that double-click is only detected when both clicks are at the same position.
+/// If the user clicks at position A, then quickly clicks at position B (within the
+/// double-click time threshold), it should NOT be treated as a double-click.
+#[test]
+fn test_double_click_requires_same_position() {
+    let mut harness = EditorTestHarness::new(80, 24).unwrap();
+
+    // Load content with multiple words on a line for double-click word selection
+    let content = "hello world goodbye\nsecond line here\n";
+    let _fixture = harness.load_buffer_from_text(content).unwrap();
+    harness.render().unwrap();
+
+    let (content_first_row, _) = harness.content_area_rows();
+    let row = content_first_row as u16;
+
+    // Get gutter width so we know where text starts
+    // Gutter is typically around 8 characters (line numbers + separator)
+    let gutter_width = 8;
+
+    // Position A: "hello" starts at column gutter_width
+    let pos_a_col = gutter_width + 2; // Over "hello"
+
+    // Position B: "world" starts around column gutter_width + 6
+    let pos_b_col = gutter_width + 8; // Over "world"
+
+    // First click at position A
+    harness.mouse_click(pos_a_col, row).unwrap();
+    harness.render().unwrap();
+
+    // Verify no selection after first click (single click should just position cursor)
+    assert!(
+        !harness.has_selection() || {
+            let range = harness.get_selection_range();
+            range.map_or(true, |r| r.start == r.end)
+        },
+        "Single click should not create a selection"
+    );
+
+    // Second click at DIFFERENT position B (but within double-click time threshold)
+    // This should NOT trigger double-click behavior (word selection)
+    // Instead, it should just position the cursor at the new location
+    harness.mouse_click(pos_b_col, row).unwrap();
+    harness.render().unwrap();
+
+    // If double-click was incorrectly triggered, it would select a word
+    // We should NOT have a word selected since the clicks were at different positions
+    let selected_text = harness.get_selected_text();
+    println!(
+        "Selected text after clicks at different positions: '{}'",
+        selected_text
+    );
+
+    // There should be no selection (or empty selection) because:
+    // - The clicks were at different positions
+    // - Even though they were within the double-click time window
+    // - This should NOT count as a double-click
+    assert!(
+        selected_text.is_empty() || selected_text.trim().is_empty(),
+        "Clicks at different positions should NOT trigger double-click word selection. \
+         Got selected text: '{}'. \
+         Bug: Double-click is being detected even when clicks are at different positions.",
+        selected_text
+    );
+
+    // Now verify that double-click at the SAME position DOES work
+    // Wait for double-click timeout to reset
+    let double_click_delay =
+        std::time::Duration::from_millis(harness.config().editor.double_click_time_ms * 2);
+    std::thread::sleep(double_click_delay);
+
+    // Double-click at position A (same position both times)
+    harness.mouse_click(pos_a_col, row).unwrap();
+    harness.mouse_click(pos_a_col, row).unwrap();
+    harness.render().unwrap();
+
+    // Now we SHOULD have word selection because both clicks were at the same position
+    let selected_text_same_pos = harness.get_selected_text();
+    println!(
+        "Selected text after double-click at same position: '{}'",
+        selected_text_same_pos
+    );
+
+    assert!(
+        !selected_text_same_pos.is_empty(),
+        "Double-click at same position SHOULD select a word, but got empty selection"
     );
 }

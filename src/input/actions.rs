@@ -4,6 +4,7 @@ use crate::input::keybindings::Action;
 use crate::model::buffer::Buffer;
 use crate::model::cursor::{Position2D, SelectionMode};
 use crate::model::event::{CursorId, Event};
+use crate::primitives::display_width::{byte_offset_at_visual_column, str_width};
 use crate::primitives::word_navigation::{
     find_word_end, find_word_start, find_word_start_left, find_word_start_right,
 };
@@ -40,6 +41,28 @@ fn pos_2d_to_byte(buffer: &Buffer, pos: Position2D) -> usize {
     };
     let clamped_col = pos.column.min(line_len);
     line_start + clamped_col
+}
+
+/// Calculate the visual column (display width) at the cursor position.
+/// Returns (visual_column, byte_column_within_line).
+fn calculate_visual_column(
+    buffer: &mut Buffer,
+    cursor_position: usize,
+    estimated_line_length: usize,
+) -> (usize, usize) {
+    let mut iter = buffer.line_iterator(cursor_position, estimated_line_length);
+    let current_line_start = iter.current_position();
+    let byte_column = cursor_position.saturating_sub(current_line_start);
+
+    if let Some((_, line_content)) = iter.next() {
+        if byte_column > 0 && byte_column <= line_content.len() {
+            (str_width(&line_content[..byte_column]), byte_column)
+        } else {
+            (byte_column, byte_column) // Fallback for edge cases
+        }
+    } else {
+        (byte_column, byte_column) // Fallback
+    }
 }
 
 /// Convert deletion ranges to Delete events
@@ -655,26 +678,31 @@ pub fn action_to_events(
 
         Action::MoveUp => {
             for (cursor_id, cursor) in state.cursors.iter() {
-                // Use iterator to navigate to previous line
-                // line_iterator positions us at the start of the current line
+                // Calculate visual column first (iterator is dropped after this call)
+                let (current_visual_column, _) = calculate_visual_column(
+                    &mut state.buffer,
+                    cursor.position,
+                    estimated_line_length,
+                );
+
+                // Use sticky_column if set (now stores visual column), otherwise use current visual column
+                let goal_visual_column = if cursor.sticky_column > 0 {
+                    cursor.sticky_column
+                } else {
+                    current_visual_column
+                };
+
+                // Now create iterator for navigation
                 let mut iter = state
                     .buffer
                     .line_iterator(cursor.position, estimated_line_length);
-                let current_line_start = iter.current_position();
-                let current_column = cursor.position.saturating_sub(current_line_start);
 
-                // Use sticky_column if set, otherwise use current column
-                let goal_column = if cursor.sticky_column > 0 {
-                    cursor.sticky_column
-                } else {
-                    current_column
-                };
-
-                // Get previous line
                 if let Some((prev_line_start, prev_line_content)) = iter.prev() {
-                    // Calculate length without trailing newline
-                    let prev_line_len = prev_line_content.trim_end_matches('\n').len();
-                    let new_pos = prev_line_start + goal_column.min(prev_line_len);
+                    // Calculate byte offset from visual column, ensuring valid character boundary
+                    let prev_line_text = prev_line_content.trim_end_matches('\n');
+                    let byte_offset =
+                        byte_offset_at_visual_column(prev_line_text, goal_visual_column);
+                    let new_pos = prev_line_start + byte_offset;
 
                     // Preserve anchor if deselect_on_move is false (Emacs mark mode)
                     let new_anchor = if cursor.deselect_on_move {
@@ -689,7 +717,7 @@ pub fn action_to_events(
                         old_anchor: cursor.anchor,
                         new_anchor,
                         old_sticky_column: cursor.sticky_column,
-                        new_sticky_column: goal_column, // Preserve the goal column
+                        new_sticky_column: goal_visual_column, // Preserve the goal visual column
                     });
                 }
             }
@@ -697,25 +725,34 @@ pub fn action_to_events(
 
         Action::MoveDown => {
             for (cursor_id, cursor) in state.cursors.iter() {
+                // Calculate visual column first (iterator is dropped after this call)
+                let (current_visual_column, _) = calculate_visual_column(
+                    &mut state.buffer,
+                    cursor.position,
+                    estimated_line_length,
+                );
+
+                // Use sticky_column if set (now stores visual column), otherwise use current visual column
+                let goal_visual_column = if cursor.sticky_column > 0 {
+                    cursor.sticky_column
+                } else {
+                    current_visual_column
+                };
+
+                // Now create iterator for navigation
                 let mut iter = state
                     .buffer
                     .line_iterator(cursor.position, estimated_line_length);
-                let current_line_start = iter.current_position();
-                let current_column = cursor.position.saturating_sub(current_line_start);
 
-                // Use sticky_column if set, otherwise use current column
-                let goal_column = if cursor.sticky_column > 0 {
-                    cursor.sticky_column
-                } else {
-                    current_column
-                };
-
-                // Skip current line, then get next line
+                // Consume current line
                 iter.next();
+
                 if let Some((next_line_start, next_line_content)) = iter.next() {
-                    // Calculate length without trailing newline
-                    let next_line_len = next_line_content.trim_end_matches('\n').len();
-                    let new_pos = next_line_start + goal_column.min(next_line_len);
+                    // Calculate byte offset from visual column, ensuring valid character boundary
+                    let next_line_text = next_line_content.trim_end_matches('\n');
+                    let byte_offset =
+                        byte_offset_at_visual_column(next_line_text, goal_visual_column);
+                    let new_pos = next_line_start + byte_offset;
 
                     // Preserve anchor if deselect_on_move is false (Emacs mark mode)
                     let new_anchor = if cursor.deselect_on_move {
@@ -730,7 +767,7 @@ pub fn action_to_events(
                         old_anchor: cursor.anchor,
                         new_anchor,
                         old_sticky_column: cursor.sticky_column,
-                        new_sticky_column: goal_column, // Preserve the goal column
+                        new_sticky_column: goal_visual_column, // Preserve the goal visual column
                     });
                 }
             }

@@ -22,6 +22,7 @@ pub mod menu_bar;
 pub mod merge_conflict;
 pub mod mouse;
 pub mod movement;
+pub mod multibyte_characters;
 pub mod multicursor;
 pub mod open_folder;
 #[cfg(feature = "plugins")]

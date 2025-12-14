@@ -442,6 +442,10 @@ pub struct Editor {
 
     /// Timestamp of the previous mouse click (for double-click detection)
     previous_click_time: Option<std::time::Instant>,
+
+    /// Position of the previous mouse click (for double-click detection)
+    /// Double-click is only detected if both clicks are at the same position
+    previous_click_position: Option<(u16, u16)>,
 }
 
 impl Editor {
@@ -812,6 +816,7 @@ impl Editor {
             keyboard_capture: false,
             terminal_mode_resume: std::collections::HashSet::new(),
             previous_click_time: None,
+            previous_click_position: None,
         })
     }
 
@@ -823,6 +828,11 @@ impl Editor {
     /// Get a reference to the async bridge (if available)
     pub fn async_bridge(&self) -> Option<&AsyncBridge> {
         self.async_bridge.as_ref()
+    }
+
+    /// Get a reference to the config
+    pub fn config(&self) -> &Config {
+        &self.config
     }
 
     /// Emit a control event
@@ -2629,10 +2639,14 @@ impl Editor {
             // Update the buffer in the new split
             self.split_manager.set_active_buffer_id(buffer_id);
 
-            // If switching TO a terminal split, enter terminal mode
+            // Set key context based on target buffer type
             if self.is_terminal_buffer(buffer_id) {
                 self.terminal_mode = true;
                 self.key_context = crate::input::keybindings::KeyContext::Terminal;
+            } else {
+                // Ensure key context is Normal when focusing a non-terminal buffer
+                // This handles the case of clicking on editor from FileExplorer context
+                self.key_context = crate::input::keybindings::KeyContext::Normal;
             }
 
             // Handle buffer change side effects

@@ -3,7 +3,7 @@ use super::*;
 use crate::services::plugins::hooks::HookArgs;
 impl Editor {
     /// Determine the current keybinding context based on UI state
-    pub(super) fn get_key_context(&self) -> crate::input::keybindings::KeyContext {
+    pub fn get_key_context(&self) -> crate::input::keybindings::KeyContext {
         use crate::input::keybindings::KeyContext;
 
         // Priority order: Menu > Prompt > Popup > Rename > Current context (FileExplorer or Normal)
@@ -2489,24 +2489,31 @@ impl Editor {
 
         match mouse_event.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                // detect double clicks, 500 ms is arbitrary but reasonable
-                if let Some(previous_click_time) = self.previous_click_time {
+                // Detect double clicks using configured time window AND same position
+                let is_double_click = if let (Some(previous_time), Some(previous_pos)) =
+                    (self.previous_click_time, self.previous_click_position)
+                {
                     let now = std::time::Instant::now();
-                    if now.duration_since(previous_click_time)
-                        < std::time::Duration::from_millis(500)
-                    {
-                        // Double click detected
-                        self.handle_mouse_double_click(col, row)?;
-                        self.previous_click_time = None; // Reset
-                        needs_render = true;
-                        return Ok(needs_render);
-                    } else {
-                        // Not a double click, update time
-                        self.previous_click_time = Some(now);
-                    }
+                    let double_click_threshold =
+                        std::time::Duration::from_millis(self.config.editor.double_click_time_ms);
+                    let within_time = now.duration_since(previous_time) < double_click_threshold;
+                    let same_position = previous_pos == (col, row);
+                    within_time && same_position
                 } else {
-                    // First click, store time
+                    false
+                };
+
+                if is_double_click {
+                    // Double click detected - both clicks within time threshold AND at same position
+                    self.handle_mouse_double_click(col, row)?;
+                    self.previous_click_time = None;
+                    self.previous_click_position = None;
+                    needs_render = true;
+                    return Ok(needs_render);
+                } else {
+                    // Not a double click - store time and position for next click
                     self.previous_click_time = Some(std::time::Instant::now());
+                    self.previous_click_position = Some((col, row));
                 }
                 self.handle_mouse_click(col, row)?;
                 needs_render = true;
@@ -2965,15 +2972,108 @@ impl Editor {
     }
 
     /// Handle mouse double click (down event)
+    /// Double-click in editor area selects the word under the cursor.
     pub(super) fn handle_mouse_double_click(&mut self, col: u16, row: u16) -> std::io::Result<()> {
         tracing::debug!("handle_mouse_double_click at col={}, row={}", col, row);
 
-        // is it in the file open dialog?
+        // Is it in the file open dialog?
         if self.handle_file_open_double_click(col, row) {
             return Ok(());
         }
 
-        // no - is it meant for the ???
+        // Find which split/buffer was clicked and handle double-click
+        let split_areas = self.cached_layout.split_areas.clone();
+        for (split_id, buffer_id, content_rect, _scrollbar_rect, _thumb_start, _thumb_end) in
+            &split_areas
+        {
+            if col >= content_rect.x
+                && col < content_rect.x + content_rect.width
+                && row >= content_rect.y
+                && row < content_rect.y + content_rect.height
+            {
+                // Double-clicked on an editor split
+                if self.is_terminal_buffer(*buffer_id) {
+                    self.key_context = crate::input::keybindings::KeyContext::Terminal;
+                    // Don't select word in terminal buffers
+                    return Ok(());
+                }
+
+                self.key_context = crate::input::keybindings::KeyContext::Normal;
+
+                // Position cursor at click location and select word
+                self.handle_editor_double_click(col, row, *split_id, *buffer_id, *content_rect)?;
+                return Ok(());
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Handle double-click in editor content area - selects the word under cursor
+    fn handle_editor_double_click(
+        &mut self,
+        col: u16,
+        row: u16,
+        split_id: crate::model::event::SplitId,
+        buffer_id: BufferId,
+        content_rect: ratatui::layout::Rect,
+    ) -> std::io::Result<()> {
+        use crate::model::event::Event;
+
+        // Focus this split
+        self.focus_split(split_id, buffer_id);
+
+        // Get cached view line mappings for this split
+        let cached_mappings = self
+            .cached_layout
+            .view_line_mappings
+            .get(&split_id)
+            .cloned();
+
+        // Get fallback from SplitViewState viewport
+        let fallback = self
+            .split_view_states
+            .get(&split_id)
+            .map(|vs| vs.viewport.top_byte)
+            .unwrap_or(0);
+
+        // Calculate clicked position in buffer
+        if let Some(state) = self.buffers.get_mut(&buffer_id) {
+            let gutter_width = state.margins.left_total_width() as u16;
+
+            let Some(target_position) = Self::screen_to_buffer_position(
+                col,
+                row,
+                content_rect,
+                gutter_width,
+                &cached_mappings,
+                fallback,
+                true, // Allow gutter clicks
+            ) else {
+                return Ok(());
+            };
+
+            // Move cursor to clicked position first
+            let primary_cursor_id = state.cursors.primary_id();
+            let event = Event::MoveCursor {
+                cursor_id: primary_cursor_id,
+                old_position: 0,
+                new_position: target_position,
+                old_anchor: None,
+                new_anchor: None,
+                old_sticky_column: 0,
+                new_sticky_column: 0,
+            };
+
+            if let Some(event_log) = self.event_logs.get_mut(&buffer_id) {
+                event_log.append(event.clone());
+            }
+            state.apply(&event);
+        }
+
+        // Now select the word under cursor
+        self.handle_action(Action::SelectWord)?;
+
         Ok(())
     }
     /// Handle mouse click (down event)
@@ -3249,19 +3349,35 @@ impl Editor {
         }
 
         // Check if click is in editor content area
+        tracing::debug!(
+            "handle_mouse_click: checking {} split_areas for click at ({}, {})",
+            self.cached_layout.split_areas.len(),
+            col,
+            row
+        );
         for (split_id, buffer_id, content_rect, _scrollbar_rect, _thumb_start, _thumb_end) in
             &self.cached_layout.split_areas
         {
+            tracing::debug!(
+                "  split_id={:?}, content_rect=({}, {}, {}x{})",
+                split_id,
+                content_rect.x,
+                content_rect.y,
+                content_rect.width,
+                content_rect.height
+            );
             if col >= content_rect.x
                 && col < content_rect.x + content_rect.width
                 && row >= content_rect.y
                 && row < content_rect.y + content_rect.height
             {
                 // Click in editor - focus split and position cursor
+                tracing::debug!("  -> HIT! calling handle_editor_click");
                 self.handle_editor_click(col, row, *split_id, *buffer_id, *content_rect)?;
                 return Ok(());
             }
         }
+        tracing::debug!("  -> No split area hit");
 
         Ok(())
     }
@@ -3927,6 +4043,17 @@ impl Editor {
         let content_col = col.saturating_sub(content_rect.x);
         let content_row = row.saturating_sub(content_rect.y);
 
+        tracing::debug!(
+            col,
+            row,
+            ?content_rect,
+            gutter_width,
+            content_col,
+            content_row,
+            num_mappings = cached_mappings.as_ref().map(|m| m.len()),
+            "screen_to_buffer_position"
+        );
+
         // Handle gutter clicks
         let text_col = if content_col < gutter_width {
             if !allow_gutter_click {
@@ -3940,22 +4067,31 @@ impl Editor {
         // Use cached view line mappings for accurate position lookup
         let visual_row = content_row as usize;
 
-        // Helper to get position from a line mapping at a given column
+        // Helper to get position from a line mapping at a given visual column
         let position_from_mapping =
             |line_mapping: &crate::app::types::ViewLineMapping, col: usize| -> usize {
-                if col < line_mapping.char_mappings.len() {
-                    if let Some(byte_pos) = line_mapping.char_mappings[col] {
+                if col < line_mapping.visual_to_char.len() {
+                    // Use O(1) lookup: visual column -> char index -> source byte
+                    if let Some(byte_pos) = line_mapping.source_byte_at_visual_col(col) {
                         return byte_pos;
                     }
                     // Column maps to virtual/injected content - find nearest real position
                     for c in (0..col).rev() {
-                        if let Some(byte_pos) = line_mapping.char_mappings[c] {
+                        if let Some(byte_pos) = line_mapping.source_byte_at_visual_col(c) {
                             return byte_pos;
                         }
                     }
                     line_mapping.line_end_byte
                 } else {
                     // Click is past end of visible content
+                    // For empty lines (only a newline), return the line start position
+                    // to keep cursor on this line rather than jumping to the next line
+                    if line_mapping.visual_to_char.len() <= 1 {
+                        // Empty or newline-only line - return first source byte if available
+                        if let Some(Some(first_byte)) = line_mapping.char_source_bytes.first() {
+                            return *first_byte;
+                        }
+                    }
                     line_mapping.line_end_byte
                 }
             };
@@ -4008,6 +4144,12 @@ impl Editor {
 
         // Focus this split (handles terminal mode exit, tab state, etc.)
         self.focus_split(split_id, buffer_id);
+
+        // Ensure key context is Normal for non-terminal buffers
+        // This handles the edge case where split/buffer don't change but we clicked from FileExplorer
+        if !self.is_terminal_buffer(buffer_id) {
+            self.key_context = crate::input::keybindings::KeyContext::Normal;
+        }
 
         // Get cached view line mappings for this split (before mutable borrow of buffers)
         let cached_mappings = self
